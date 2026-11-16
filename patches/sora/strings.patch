@@ -1,0 +1,211 @@
+diff --git a/chrome/app/generated_resources.grd b/chrome/app/generated_resources.grd
+index 0643b11..a169427 100644
+--- a/chrome/app/generated_resources.grd
++++ b/chrome/app/generated_resources.grd
+@@ -310,6 +310,9 @@ are declared in tools/grit/grit_args.gni.
+       <!-- Shortcut Input specific strings -->
+       <part file="shortcut_input_strings.grdp" />
+ 
++      <!-- Sora Browser strings -->
++      <part file="sora_strings.grdp" />
++
+       <!-- Chrome-OS-specific strings -->
+       <if expr="is_chromeos">
+         <part file="chromeos_shared_strings.grdp" />
+diff --git a/chrome/app/resources/generated_resources_pt-BR.xtb b/chrome/app/resources/generated_resources_pt-BR.xtb
+index 75ac337..6263b57 100644
+--- a/chrome/app/resources/generated_resources_pt-BR.xtb
++++ b/chrome/app/resources/generated_resources_pt-BR.xtb
+@@ -10919,4 +10919,9 @@ Isso pode incluir informações sobre softwares instalados, arquivos, seu navega
+ <translation id="998347228911661591">Sincronizar seus grupos de guias</translation>
+ <translation id="998747458861718449">I&amp;nspecionar</translation>
+ <translation id="998852291477823323">As políticas configuradas não permitem esta ação.</translation>
++<translation id="6129953537138746214">Espaço</translation>
++<translation id="8298695361254434964">Novo espaço</translation>
++<translation id="8562051393734038685">Modo compacto</translation>
++<translation id="416684462083548905">Abrir link no &amp;Glance</translation>
++<translation id="8131740175452115882">Confirmar</translation>
+ </translationbundle>
+\ No newline at end of file
+diff --git a/chrome/app/sora_strings.grdp b/chrome/app/sora_strings.grdp
+new file mode 100644
+index 0000000..7a70a91
+--- /dev/null
++++ b/chrome/app/sora_strings.grdp
+@@ -0,0 +1,19 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Sora Browser strings. -->
++<grit-part>
++  <message name="IDS_SORA_WORKSPACE_DEFAULT_NAME" desc="Name of a new workspace, a set of tabs in the sidebar.">
++    Space
++  </message>
++  <message name="IDS_SORA_WORKSPACE_NEW" desc="Tooltip of the button that creates a workspace.">
++    New space
++  </message>
++  <message name="IDS_SORA_COMPACT_MODE" desc="Name of the toolbar button that turns compact mode (sidebar hidden until hovered) on and off.">
++    Compact mode
++  </message>
++  <message name="IDS_SORA_GLANCE_OPEN_LINK" desc="Context menu item that opens the link in Glance, a preview card over the current page.">
++    Open link in &amp;Glance
++  </message>
++  <message name="IDS_SORA_GLANCE_CONFIRM_CLOSE" desc="Shown next to Glance's close button after Esc, asking to press Esc again to close.">
++    Confirm
++  </message>
++</grit-part>
+diff --git a/chrome/browser/renderer_context_menu/render_view_context_menu.cc b/chrome/browser/renderer_context_menu/render_view_context_menu.cc
+index 7b0e509..41d6129 100644
+--- a/chrome/browser/renderer_context_menu/render_view_context_menu.cc
++++ b/chrome/browser/renderer_context_menu/render_view_context_menu.cc
+@@ -2075,9 +2075,8 @@ void RenderViewContextMenu::AppendLinkItems() {
+     // Sora: "Open Link in Glance" (Zen's context menu item).
+     if (show_open_in_new_tab && IsNormalBrowser() &&
+         params_.link_url.SchemeIsHTTPOrHTTPS()) {
+-      // TODO(sora): translated string (Zen's zen-open-link-in-glance).
+-      menu_model_.AddItem(kSoraOpenLinkInGlanceCommandId,
+-                          u"Open Link in Glance");
++      menu_model_.AddItemWithStringId(kSoraOpenLinkInGlanceCommandId,
++                                      IDS_SORA_GLANCE_OPEN_LINK);
+     }
+ #endif
+ 
+diff --git a/chrome/browser/ui/views/glance/glance_controller.cc b/chrome/browser/ui/views/glance/glance_controller.cc
+index 4f8de35..a1bfdba 100644
+--- a/chrome/browser/ui/views/glance/glance_controller.cc
++++ b/chrome/browser/ui/views/glance/glance_controller.cc
+@@ -318,8 +318,10 @@ class GlanceButton : public views::ImageButton {
+   }
+ 
+  private:
+-  // TODO(sora): translated string; Zen's is zen-glance-confirm-close.
+-  static std::u16string GetConfirmLabel() { return u"Confirm"; }
++  // Zen's is zen-glance-confirm-close.
++  static std::u16string GetConfirmLabel() {
++    return l10n_util::GetStringUTF16(IDS_SORA_GLANCE_CONFIRM_CLOSE);
++  }
+ 
+   int GetLabelWidth() const {
+     return std::min(
+diff --git a/chrome/browser/ui/views/tabs/vertical/sora_workspaces_controller.cc b/chrome/browser/ui/views/tabs/vertical/sora_workspaces_controller.cc
+index 55223f3..e52d147 100644
+--- a/chrome/browser/ui/views/tabs/vertical/sora_workspaces_controller.cc
++++ b/chrome/browser/ui/views/tabs/vertical/sora_workspaces_controller.cc
+@@ -20,11 +20,13 @@
+ #include "chrome/browser/ui/tabs/tab_strip_model_delegate.h"
+ #include "chrome/browser/ui/ui_features.h"
+ #include "chrome/browser/ui/views/tabs/groups/tab_group_editor_bubble_view.h"
++#include "chrome/grit/generated_resources.h"
+ #include "components/tab_groups/tab_group_visual_data.h"
+ #include "components/tabs/public/tab_group.h"
+ #include "content/public/browser/web_contents.h"
+ #include "third_party/icu/source/common/unicode/uchar.h"
+ #include "third_party/icu/source/common/unicode/utf16.h"
++#include "ui/base/l10n/l10n_util.h"
+ #include "ui/views/view.h"
+ #include "ui/views/widget/widget.h"
+ #include "url/gurl.h"
+@@ -32,9 +34,10 @@
+ namespace {
+ 
+ // Zen names new workspaces "Space" (ZenSpaceManager.mjs,
+-// createAndSaveWorkspace). Sora has no string resources yet.
+-// TODO(sora): move to a Sora .grd once there is one.
+-constexpr char16_t kSoraDefaultWorkspaceName[] = u"Space";
++// createAndSaveWorkspace).
++std::u16string DefaultWorkspaceName() {
++  return l10n_util::GetStringUTF16(IDS_SORA_WORKSPACE_DEFAULT_NAME);
++}
+ 
+ // While a tab drag is in progress the strip cannot be edited; check again
+ // after this delay.
+@@ -155,7 +158,7 @@ std::u16string SoraWorkspacesController::GetDisplayName(
+   std::u16string name =
+       visual_data ? ParseTitle(visual_data->title()).name : std::u16string();
+   if (name.empty()) {
+-    return kSoraDefaultWorkspaceName;
++    return DefaultWorkspaceName();
+   }
+   return name;
+ }
+@@ -204,7 +207,7 @@ void SoraWorkspacesController::CreateWorkspace(
+   }
+   // The new group gets the next unused color, like any new tab group.
+   const std::optional<tab_groups::TabGroupId> workspace = AddWorkspace(
+-      /*index=*/-1, kSoraDefaultWorkspaceName, /*color=*/std::nullopt);
++      /*index=*/-1, DefaultWorkspaceName(), /*color=*/std::nullopt);
+   if (!workspace) {
+     return;
+   }
+@@ -459,7 +462,7 @@ bool SoraWorkspacesController::EnsureActiveWorkspace() {
+     } else {
+       target = model_->AddToNewGroup(loose_tabs);
+       // Sora: the default workspace has no theme, as Zen's first "Space".
+-      SetVisuals(*target, kSoraDefaultWorkspaceName, kUnthemedColor);
++      SetVisuals(*target, DefaultWorkspaceName(), kUnthemedColor);
+     }
+   }
+ 
+diff --git a/chrome/browser/ui/views/tabs/vertical/vertical_tab_strip_bottom_container.cc b/chrome/browser/ui/views/tabs/vertical/vertical_tab_strip_bottom_container.cc
+index 550df70..a587cc1 100644
+--- a/chrome/browser/ui/views/tabs/vertical/vertical_tab_strip_bottom_container.cc
++++ b/chrome/browser/ui/views/tabs/vertical/vertical_tab_strip_bottom_container.cc
+@@ -15,8 +15,10 @@
+ #include "chrome/browser/ui/views/tabs/vertical/sora_workspace_views.h"
+ #include "chrome/browser/ui/views/tabs/vertical/sora_workspaces_controller.h"
+ #include "chrome/browser/ui/views/tabs/vertical/top_container_button.h"
++#include "chrome/grit/generated_resources.h"
+ #include "components/vector_icons/vector_icons.h"
+ #include "ui/actions/actions.h"
++#include "ui/base/l10n/l10n_util.h"
+ #include "ui/base/metadata/metadata_impl_macros.h"
+ #include "ui/base/models/image_model.h"
+ #include "ui/base/ui_base_features.h"
+@@ -37,10 +39,6 @@ namespace {
+ constexpr int kSoraFooterButtonSize = 28;
+ constexpr int kSoraFooterIconSize = 16;
+ constexpr int kSoraFooterButtonRadius = 4;
+-// Sora: tooltip of the footer's "+". Zen's is "Create Space"; Sora has no
+-// string resources yet.
+-// TODO(sora): move to a Sora .grd once there is one.
+-constexpr char16_t kSoraNewWorkspaceTooltip[] = u"New space";
+ }  // namespace
+ 
+ VerticalTabStripBottomContainer::VerticalTabStripBottomContainer(
+@@ -258,9 +256,10 @@ void VerticalTabStripBottomContainer::SetSoraWorkspaces(
+       features::IsRoundedIconsEnabled() ? vector_icons::kAddWeight500CustomIcon
+                                         : vector_icons::kAddOldIcon,
+       ui::kColorIcon));
+-  new_workspace_button->SetTooltipText(kSoraNewWorkspaceTooltip);
++  new_workspace_button->SetTooltipText(
++      l10n_util::GetStringUTF16(IDS_SORA_WORKSPACE_NEW));
+   new_workspace_button->GetViewAccessibility().SetName(
+-      kSoraNewWorkspaceTooltip);
++      l10n_util::GetStringUTF16(IDS_SORA_WORKSPACE_NEW));
+   views::LabelButton* const new_workspace_button_ptr =
+       new_workspace_button.get();
+   new_workspace_button->SetCallback(base::BindRepeating(
+diff --git a/chrome/browser/ui/views/toolbar/toolbar_view.cc b/chrome/browser/ui/views/toolbar/toolbar_view.cc
+index 6ce9c36..b110223 100644
+--- a/chrome/browser/ui/views/toolbar/toolbar_view.cc
++++ b/chrome/browser/ui/views/toolbar/toolbar_view.cc
+@@ -200,8 +200,6 @@ constexpr int kSoraButtonRowHeight = 36;
+ constexpr int kSoraLocationRowHeight = 37;
+ constexpr int kSoraLocationBarMargin = 1;
+ constexpr int kSoraButtonGap = 2;
+-// Sora: compact mode toggle label. Sora ships no string resources of its own.
+-constexpr char16_t kSoraCompactModeButtonName[] = u"Compact mode";
+ 
+ // Gets the display mode for a given browser.
+ ToolbarView::DisplayMode GetDisplayMode(BrowserWindowInterface* browser) {
+@@ -660,9 +658,10 @@ void ToolbarView::Init() {
+   sora_compact_mode_button_->SetVectorIcon(features::IsRoundedIconsEnabled()
+                                                ? kDockToLeftIcon
+                                                : kDockToLeftOldIcon);
+-  sora_compact_mode_button_->SetTooltipText(kSoraCompactModeButtonName);
++  sora_compact_mode_button_->SetTooltipText(
++      l10n_util::GetStringUTF16(IDS_SORA_COMPACT_MODE));
+   sora_compact_mode_button_->GetViewAccessibility().SetName(
+-      kSoraCompactModeButtonName);
++      l10n_util::GetStringUTF16(IDS_SORA_COMPACT_MODE));
+   sora_compact_mode_button_->GetViewAccessibility().SetRole(
+       ax::mojom::Role::kToggleButton);
+ 

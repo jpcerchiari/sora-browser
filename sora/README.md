@@ -1,112 +1,116 @@
-# Desenvolvimento do Sora Browser
+# Sora Browser development
 
-Navegador pessoal: o [ungoogled-chromium](https://github.com/ungoogled-software/ungoogled-chromium)
-com a aparência e os recursos do [Zen Browser](https://github.com/zen-browser/desktop)
-reescritos em C++/Views.
+A personal browser: [ungoogled-chromium](https://github.com/ungoogled-software/ungoogled-chromium)
+with the look and features of [Zen Browser](https://github.com/zen-browser/desktop)
+rewritten in C++/Views.
 
-Este repositório é um fork do
+This repository is a fork of
 [ungoogled-chromium-windows](https://github.com/ungoogled-software/ungoogled-chromium-windows)
-(remote `upstream`). O que é do Sora fica separado, para que as atualizações do upstream
-entrem com o mínimo de conflito:
+(remote `upstream`). Everything specific to Sora is kept separate, so that upstream updates
+come in with as few conflicts as possible:
 
-- `sora/`: esta documentação e as ferramentas;
-- `patches/sora/`: os patches do Sora, listados no fim de `patches/series`;
-- `.gitattributes`: mantém os patches com LF.
+- `sora/`: this documentation and the tools;
+- `patches/sora/`: the Sora patches, listed at the end of `patches/series`;
+- `.gitattributes`: keeps the patches with LF line endings.
 
-O Zen é um fork do Firefox e a interface dele é CSS, JS e XUL. Nada disso roda na
-interface do Chromium. Por isso ele entra aqui como **referência de design e de
-comportamento**, não como código. Referência: [zen-browser/desktop](https://github.com/zen-browser/desktop), commit `535ccb0`.
+Zen is a Firefox fork and its UI is CSS, JS and XUL. None of that runs in the Chromium
+UI. That is why it is used here as a **design and behavior reference**, not as code.
+Reference: [zen-browser/desktop](https://github.com/zen-browser/desktop), commit `535ccb0`.
 
-## Decisões
+## Decisions
 
-- Base: **ungoogled-chromium** (2026-11-16), na versão do submódule
-  (`ungoogled-chromium/chromium_version.txt`, hoje 157.0.8103.78). Substitui a decisão
-  anterior de usar o Chromium puro.
-- Primeiro build: **Windows**.
-- Nome: **Sora Browser**. "Sora" é "céu" em japonês, na linha do Zen.
+- Base: **ungoogled-chromium** (2026-11-16), at the submodule version
+  (`ungoogled-chromium/chromium_version.txt`, currently 157.0.8103.78). Replaces the earlier
+  decision to use plain Chromium.
+- First build: **Windows**.
+- Name: **Sora Browser**. "Sora" means "sky" in Japanese, in line with Zen.
 
-## Como compilar
+## Building
 
-Igual ao ungoogled-chromium-windows: seguir [`docs/building.md`](../docs/building.md) (Visual Studio, Python,
-`python build.py`). O `build.py` baixa o Chromium, poda os binários, aplica
-`ungoogled-chromium/patches/series` e depois `patches/series` (onde estão os do Sora),
-roda `sora/tools/rebrand_strings.py` (ver abaixo), faz a substituição de domínios e compila. Precisa de ~100 GB livres.
+Same as ungoogled-chromium-windows: follow [`docs/building.md`](../docs/building.md) (Visual Studio, Python,
+`python build.py`). `build.py` downloads Chromium, prunes the binaries, applies
+`ungoogled-chromium/patches/series` and then `patches/series` (where the Sora patches are),
+runs `sora/tools/rebrand_strings.py` (see below), does the domain substitution and compiles. It needs ~100 GB free.
 
-## Como escrever um patch sem a árvore do Chromium
+## Writing a patch without the Chromium tree
 
-`sora/tools/minitree.py` baixa só os arquivos pedidos, na versão do ungoogled, e aplica neles
-os patches anteriores da série, na ordem do build:
+`sora/tools/minitree.py` downloads only the requested files, at the ungoogled version, and applies
+the earlier patches in the series to them, in build order:
 
 ```bash
 python3 sora/tools/minitree.py /tmp/mt chrome/browser/ui/color/chrome_color_mixers.cc
-# editar em /tmp/mt
-git -C /tmp/mt add -N .   # se criou arquivos novos
-git -C /tmp/mt diff > patches/sora/<nome>.patch
+# edit in /tmp/mt
+git -C /tmp/mt add -N .   # if you created new files
+git -C /tmp/mt diff > patches/sora/<name>.patch
 ```
 
-Depois, acrescentar `sora/<nome>.patch` ao fim de `patches/series`. Para refazer um patch que
-já está na série, usar `--upto sora/<nome>.patch`. Conferir com `patch -p1 --ignore-whitespace
---forward`, que é o que o `build.py` usa.
+Then append `sora/<name>.patch` to the end of `patches/series`. To redo a patch that
+is already in the series, use `--upto sora/<name>.patch`. Check it with `patch -p1 --ignore-whitespace
+--forward`, which is what `build.py` uses.
 
-Ao atualizar o upstream (`git fetch upstream && git merge upstream/master`), rodar o minitree
-com todos os arquivos tocados pelo Sora para ver se os patches ainda aplicam.
+When updating from upstream (`git fetch upstream && git merge upstream/master`), run minitree
+with every file touched by Sora to check that the patches still apply.
 
 ## Patches
 
-Todos aplicam sobre a 157.0.8103.78 (conferir com `python3 sora/tools/check_patches.py`).
-A especificação visual do Zen que eles seguem está em [`zen-spec.md`](zen-spec.md).
+All of them apply on top of 157.0.8103.78 (check with `python3 sora/tools/check_patches.py`).
+The Zen visual spec they follow is in [`zen-spec.md`](zen-spec.md).
 
-| patch | o que faz |
+| patch | what it does |
 |---|---|
-| `sora/branding.patch` | Nome do produto e pasta de dados (`%LOCALAPPDATA%\Sora\User Data`), ProgIDs `SoraHTM`/`SoraPDF` e esquema `sora:`. Os GUIDs e CLSIDs de COM continuam os do Chromium. |
-| `sora/vertical-tabs-by-default.patch` | Abas verticais ligadas por padrão (pref `vertical_tabs.enabled`). |
-| `sora/color-mixer.patch` | `sora_color_mixer.cc`: paleta do Zen sem Mica. Moldura, barra e lateral em `#e9e9e9`/`#131313`; texto com 12% de destaque a 90%; hover de aba 7%; aba ativa com véu branco de 80%/18% e 2%/5% de destaque; barra de endereço com o texto a 8%/15%; botões da barra com ícone a 70%, hover 7% e pressionado 10%. Tema instalado, alto contraste e cores forçadas continuam valendo. |
-| `sora/floating-contents.patch` | Página como cartão flutuante: margem de 8px (0 do lado das abas), cantos de 5px, sombra sempre visível, sem separadores, sem os cantos côncavos e sem o contorno da faixa. Reaproveita o `shadow_box` do painel lateral. |
-| `sora/vertical-tab-metrics.patch` | Lateral com 186px (mín. 152, máx. 500, recolhida 60), abas de 36px com raio 6 e 4px entre elas, padding de 7px nos lados e 5px em cima e embaixo. |
-| `sora/sidebar-toolbar.patch` | Barra única do Zen: com a lateral expandida, a barra fica no topo dela, em duas linhas (☰ e botões à esquerda, voltar/avançar/recarregar à direita; barra de endereço embaixo). A página sobe até o topo, deixando só a faixa dos botões da janela. |
-| `sora/toolbar-shapes.patch` | Botões da barra com 28px e raio 4; barra de endereço e lista de resultados com raio 6. |
-| `sora/vertical-tab-style.patch` | Título da aba com 14px e botão de fechar só no hover ou no foco. |
-| `sora/omnibox-idle.patch` | Barra de endereço do Zen: sem foco mostra só o domínio (`ShouldTrimDisplayUrlAfterHostName`), com foco mostra a URL completa já no clique; texto em peso 500; estrela, modo leitura, zoom e cookies de terceiros escondidos (as ações e os atalhos continuam funcionando). |
-| `sora/sidebar-rows.patch` | Lateral expandida sem a fileira nativa de botões (busca de abas, recolher) e sem o separador; linha "+ Nova aba" no topo da lista, no formato de aba, com texto a 70% e `scale(0.985)` ao pressionar; rodapé com Downloads à esquerda e o botão de recolher à direita. Recolhida, tudo volta ao padrão do Chromium. |
-| `sora/glance.patch` | Glance: Alt+clique num link http(s) abre a página num cartão flutuante sobre a aba (80% da largura, raio 5, sombra do Zen, fundo da aba escurecido), com os botões fechar, abrir como aba (Ctrl+O) e split. Fecha com Esc, clique fora ou o X. Substitui o Alt+clique de download. Spec na seção 10 de `zen-spec.md`. |
-| `sora/compact-mode.patch` | Modo compacto do Zen: botão logo depois do ☰ (pref `sora.compact_mode.enabled`, desligado por padrão). A lateral vira um painel flutuante que entra por uma faixa de 5px na borda esquerda (250ms para entrar, 150ms para sair, 150ms de tolerância no hover), com cantos de 5px e sombra; o cartão ganha 8px dos dois lados. Com o painel aberto, a barra fica no topo dele, nas duas linhas; Ctrl+L revela o painel (`window-controls.patch`). |
-| `sora/essentials.patch` | As fixadas viram os Essentials do Zen: grade com o `auto-fit` do Zen (vão de 4px, colunas pelas regras de 2/4/5/6/9 blocos), blocos de 46px só com o favicon, sem contorno, fundo do elemento da barra; o bloco ativo pinta o favicon desfocado (sigma 20) atrás de um cartão branco 85% / `rgba(68,64,64,.85)`. Três cores novas em `sora_color_mixer.cc`. |
-| `sora/floating-urlbar.patch` | Barra de endereço flutuante do Zen: aberta pelo teclado (Ctrl+L, Alt+D, F6) ou numa nova aba, o campo vai para uma camada sobre a página, centralizado (62px de altura, largura do Zen, raio 6.5, contorno de 0.5px e a sombra grande), com os resultados colados embaixo; o lugar na lateral fica como marcador com a cor de hover. Clique do mouse abre no lugar. Esc fecha e devolve o foco à página. |
-| `sora/omnibox-results.patch` | Lista de resultados do popup WebUI clássico com o visual do Zen: até 244px sem barra de rolagem, padding de 12px, linhas de 45px com raio 6, texto 14px peso 500 a 70%, URL `#4a4a4a`/`#aaaaaa`, hover de 5%, selecionada na cor de destaque a 60% com texto branco e favicon num chip branco, chip do buscador de 12px/600. Regras novas só valem dentro de `omnibox-popup-app`, então a busca da NTP não muda. |
-| `sora/workspaces.patch` | Workspaces do Zen sobre o modo foco de grupos de abas (`TabGroupsFocusing`, ligado por padrão, sem congelar as abas dos outros): workspace = grupo de abas, ativo = grupo em foco. Só as abas do ativo e as fixadas (essentials) aparecem; abas novas e abas sem grupo entram no ativo; selecionar uma aba de outro workspace troca para ele; nome, cor e o ativo voltam com a restauração da sessão (o ativo é o grupo da aba ativa). Indicador de 44px acima de "+ Nova aba" (ponto na cor do grupo, nome 13px/600, fundo de hover) e, no rodapé, um ponto por workspace (30×30, raio 6, cinza a 70% quando inativo) e o "+". Clique no indicador ou clique direito num ícone abre o editor de grupo do Chromium (nome, cor, apagar). Ctrl+Alt+→/← e Alt+Shift+X/Z trocam. Spec na seção 11 de `zen-spec.md`. |
-| `sora/window-controls.patch` | Botões da janela do Zen: com a barra na lateral, uma faixa de 8px acima do cartão (arrastável) com os botões invisíveis; no hover ela cresce para 34px (200ms de atraso, 150ms ease-in-out), os botões aparecem e a borda de cima do cartão desce sem mover a página. No modo compacto, a barra vai no topo do painel flutuante, acima da página. |
-| `sora/frame-polish.patch` | Acabamento da moldura. Cor de destaque do Zen: o destaque do Windows misturado com a base (50% no claro, 80% no escuro, e no escuro só 40% dele sobre o preto) dá a cor dominante, que tinge o texto em 12%; no claro, saturação +0.3 e luminosidade puxada 60% para 0.42 dão a primária (`kColorSoraAccent`), que tinge a aba ativa; `kColorSoraAccentButtonBackground` é a primária em oklch com a luminosidade presa em .35–.6 / .55–.7. A cor do workspace ativo (ou a escolhida em Personalizar o Chrome) vence o destaque do sistema e entra sem a mistura, como um tema de workspace do Zen; janela anônima usa a primária `rgb(11,10,11)` do Zen. Sombra do cartão exata, `0 3px 8px rgba(0,0,0,.24)`, com uma fonte de sombra própria no `ShadowFrameView`. Painel do modo compacto com fundo `rgb(240,240,244)`/`rgb(23,23,26)` e contorno de 1px branco a 15% por dentro, que continua na barra do topo do painel. |
-| `sora/tabs-polish.patch` | Acabamento das abas verticais. Linha "+ Nova aba" sem ink drop, com o fundo de hover das abas (véu de 7%). Alça de redimensionar do Zen no `ResizeArea` da lateral: barra de 5px com raio 4, de 8px do topo a 8px da base, em `kColorSoraAccentButtonBackground`, invisível em repouso e a 0.8 no hover, no foco ou ao arrastar (200ms de atraso para aparecer, 200ms ease-in-out); clique duplo volta aos 186px. Aba pressionada em `scale(0.98)` por 100ms, numa camada que o `TabCollectionAnimatingLayoutManager` não destrói enquanto dura (`kSoraKeepLayerKey`). Abrir e fechar aba com opacidade e escala 0.95, dentro da animação de layout de 200ms do Chromium e terminando em 120ms/100ms. "X" de fechar desenhado com duas barras de 1.5px que vão de 0°/12px a 45°/15px em 120ms a cada vez que o botão aparece. Favicon sem throbber (o título "Carregando..." continua) e aba descarregada com favicon e título a 50%, sem o anel nem o favicon encolhido. Só nas abas verticais. |
-| `sora/split-view.patch` | Split view do Zen sobre o split nativo do Chromium (2 abas). Com a página como cartão (abas verticais, fora da tela cheia), cada painel vira um cartão próprio com o raio de 5px e a sombra do Zen (pintada pelo `MultiContentsBackgroundView`, então aparece também no vão), os painéis ocupam o lugar do cartão único e ficam a 8px um do outro; o contorno do painel (o do Chromium, 1px) encosta no cartão por fora. A alça de redimensionar é o vão, invisível (a pegada só aparece com foco do teclado), e a mini barra do Chromium some. Na lista de abas, o split vira uma linha única no formato de aba: fundo da aba selecionada quando ativo, separador de 1px × 16px quando não, e a aba do painel ativo com um destaque de 28px (texto a 4.8%/9%). Spec na seção 12 de `zen-spec.md`. |
-| `sora/workspaces-polish.patch` | Acabamento dos workspaces. Sem tema: grupo cinza é workspace sem tema, e o `BrowserWidget` ignora a cor do modo foco para ele, então aparece o destaque do sistema (ou a cor de Personalizar o Chrome); o workspace padrão nasce cinza, e escolher cinza no editor tira o tema. A cor do workspace ativo acompanha o editor na hora (o Chromium só a atualiza ao trocar de grupo). Ícone: um emoji no começo do nome, seguido de espaço ("🚀 Trabalho"), fica no título do grupo e por isso volta com a sessão; aparece no indicador e no rodapé no lugar do ponto (14px; inativo em cinza a 70%). Troca: a lista de abas entra deslizando do lado do workspace novo (largura inteira, 250ms, ease-out forte no lugar da mola sem bounce), recortada à lateral; sem o cross-fade do tema. Alt+1…9 e Alt+0 vão para o 1º…10º workspace (só a fileira de cima; só no Windows), selecionando a última aba usada nele. Fechar a última aba do workspace ativo reabre o workspace no mesmo lugar, com nome e cor, numa aba nova (o Chromium apaga o grupo com a última aba; apagar pelo editor ou fechar a janela continua apagando). Indicador como no Zen: clique duplo no nome renomeia ali mesmo (Enter ou sair salva, Esc cancela, nome vazio é ignorado), clique duplo no ícone abre o editor; clique direito, Enter e Espaço abrem o editor; clique simples não faz nada. |
-| `sora/glance-polish.patch` | Acabamento do Glance. Botões na cor de destaque do Zen (`kColorSoraAccent`: fundo `#1c1c1c`/`#e2e2e2` com 4% dela, ícone nela), hover `#292929`/`#cccccc` com escala 1.02 e pressionado 0.98 (50ms). Abrir: o cartão voa em arco do ponto do clique (o navegador não conhece o retângulo do link; quadrado de 24px) até o lugar, numa mola com bounce 0.2 que para em 350ms, sem relayout da página (`SetNativeViewSize`); a página entra em 87.5ms; a aba de trás encolhe para 0.97 (transform na janela aura da página) enquanto o véu de 70% aparece; os botões entram com opacidade e 20px em 200ms depois de 150ms. Fechar: arco de volta, página some em 0.15s, botões em 120ms, aba de trás volta em 233ms. Esc com um elemento da página focado deixa o X vermelho `rgb(220,53,69)` com "Confirm" por 3s; o segundo Esc fecha. Ctrl+W e Ctrl+F4 fecham só o Glance (`PreHandleKeyboardEvent` do Glance). Item "Open Link in Glance" no menu de contexto de links http(s). A página do Glance ganha os tab helpers que ainda não estão nas `TabFeatures` (autofill, zoom, infobars, id de sessão; `friend` em `tab_helpers.h`) e `alert`/`confirm`/`prompt` como diálogos da janela, como no DevTools. Textos "Confirm" e "Open Link in Glance" ainda sem tradução. |
-| `sora/app-icon.patch` | Sobe `kCurrentProfileIconVersion` para 11, para os atalhos de perfil do Windows serem refeitos com o ícone novo (pedido no `win/README` do Chromium). Os ícones em si não são patch: ver "Ícone" abaixo. |
+| `sora/branding.patch` | Product name and data folder (`%LOCALAPPDATA%\Sora\User Data`), ProgIDs `SoraHTM`/`SoraPDF` and the `sora:` scheme. Own Active Setup GUID and CLSIDs (notifications, elevation service and tracing service), so it does not collide with a Chromium installed on the same machine. The IIDs and TypeLibs remain Chromium's: they are in the `.idl` files and in the checked-in MIDL output in `third_party/win_build_output`, which can only be regenerated on Windows. |
+| `sora/vertical-tabs-by-default.patch` | Vertical tabs enabled by default (pref `vertical_tabs.enabled`). |
+| `sora/color-mixer.patch` | `sora_color_mixer.cc`: Zen palette without Mica. Frame, toolbar and sidebar in `#e9e9e9`/`#131313`; text with 12% accent at 90%; tab hover 7%; active tab with an 80%/18% white veil and 2%/5% accent; address bar with text at 8%/15%; toolbar buttons with the icon at 70%, hover 7% and pressed 10%. Installed themes, high contrast and forced colors still apply. |
+| `sora/floating-contents.patch` | Page as a floating card: 8px margin (0 on the tab side), 5px corners, shadow always visible, no separators, no concave corners and no tab strip outline. Reuses the side panel's `shadow_box`. |
+| `sora/vertical-tab-metrics.patch` | Sidebar at 186px (min. 152, max. 500, collapsed 60), 36px tabs with radius 6 and 4px between them, 7px padding on the sides and 5px on top and bottom. |
+| `sora/sidebar-toolbar.patch` | Zen's single toolbar: with the sidebar expanded, the toolbar sits at its top, in two rows (☰ and buttons on the left, back/forward/reload on the right; address bar below). The page extends up to the top, leaving only the window-controls strip. |
+| `sora/toolbar-shapes.patch` | Toolbar buttons at 28px with radius 4; address bar and results list with radius 6. |
+| `sora/vertical-tab-style.patch` | Tab title at 14px and close button only on hover or focus. |
+| `sora/omnibox-idle.patch` | Zen address bar: unfocused it shows only the domain (`ShouldTrimDisplayUrlAfterHostName`), focused it shows the full URL right on click; text at weight 500; star, reading mode, zoom and third-party cookies hidden (the actions and shortcuts still work). |
+| `sora/sidebar-rows.patch` | Expanded sidebar without the native button row (tab search, collapse) and without the separator; a "+ New tab" row at the top of the list, shaped like a tab, with text at 70% and `scale(0.985)` when pressed; footer with Downloads on the left and the collapse button on the right. When collapsed, everything reverts to Chromium's default. |
+| `sora/glance.patch` | Glance: Alt+click on an http(s) link opens the page in a floating card over the tab (80% of the width, radius 5, Zen shadow, tab background dimmed), with close, open as tab (Ctrl+O) and split buttons. Closes with Esc, a click outside or the X. Replaces Alt+click download. Spec in section 10 of `zen-spec.md`. |
+| `sora/compact-mode.patch` | Zen compact mode: button right after ☰ (pref `sora.compact_mode.enabled`, off by default). The sidebar becomes a floating panel that comes in from a 5px strip on the left edge (250ms to enter, 150ms to leave, 150ms hover tolerance), with 5px corners and a shadow; the card gets 8px on both sides. With the panel open, the toolbar sits at its top, in two rows; Ctrl+L reveals the panel (`window-controls.patch`). |
+| `sora/essentials.patch` | Pinned tabs become Zen's Essentials: grid with Zen's `auto-fit` (4px gap, columns following the 2/4/5/6/9 tile rules), 46px tiles with only the favicon, no outline, toolbar element background; the active tile paints the blurred favicon (sigma 20) behind an 85% white / `rgba(68,64,64,.85)` card. Three new colors in `sora_color_mixer.cc`. |
+| `sora/floating-urlbar.patch` | Zen floating address bar: opened from the keyboard (Ctrl+L, Alt+D, F6) or in a new tab, the field moves to a layer over the page, centered (62px tall, Zen width, radius 6.5, 0.5px outline and the large shadow), with the results attached below; its place in the sidebar stays as a placeholder in the hover color. A mouse click opens it in place. Esc closes it and returns focus to the page. |
+| `sora/omnibox-results.patch` | Results list of the classic WebUI popup with Zen's look: up to 244px without a scrollbar, 12px padding, 45px rows with radius 6, 14px text at weight 500 at 70%, URL `#4a4a4a`/`#aaaaaa`, 5% hover, selected row in the accent color at 60% with white text and the favicon in a white chip, 12px/600 search engine chip. New rules only apply inside `omnibox-popup-app`, so the NTP search box is unchanged. |
+| `sora/workspaces.patch` | Zen Workspaces on top of the tab group focus mode (`TabGroupsFocusing`, on by default, without freezing the tabs of other groups): workspace = tab group, active = focused group. Only the active workspace's tabs and the pinned ones (essentials) are shown; new tabs and ungrouped tabs go into the active one; selecting a tab from another workspace switches to it; name, color and the active workspace come back with session restore (the active one is the active tab's group). 44px indicator above "+ New tab" (dot in the group color, 13px/600 name, hover background) and, in the footer, one dot per workspace (30×30, radius 6, gray at 70% when inactive) and the "+". Clicking the indicator or right-clicking an icon opens Chromium's group editor (name, color, delete). Ctrl+Alt+→/← and Alt+Shift+X/Z switch. Spec in section 11 of `zen-spec.md`. |
+| `sora/window-controls.patch` | Zen window controls: with the toolbar in the sidebar, an 8px strip above the card (draggable) with invisible buttons; on hover it grows to 34px (200ms delay, 150ms ease-in-out), the buttons appear and the card's top edge moves down without moving the page. In compact mode, the toolbar goes at the top of the floating panel, above the page. |
+| `sora/frame-polish.patch` | Frame polish. Zen accent color: the Windows accent mixed with the base (50% in light, 80% in dark, and in dark only 40% of it over black) gives the dominant color, which tints the text by 12%; in light, saturation +0.3 and lightness pulled 60% toward 0.42 give the primary (`kColorSoraAccent`), which tints the active tab; `kColorSoraAccentButtonBackground` is the primary in oklch with lightness clamped to .35–.6 / .55–.7. The active workspace's color (or the one chosen in Customize Chrome) wins over the system accent and is applied without the mix, like a Zen workspace theme; incognito windows use Zen's primary `rgb(11,10,11)`. Exact card shadow, `0 3px 8px rgba(0,0,0,.24)`, with its own shadow source in `ShadowFrameView`. Compact mode panel with background `rgb(240,240,244)`/`rgb(23,23,26)` and a 1px inner outline in white at 15%, which continues into the toolbar at the top of the panel. |
+| `sora/tabs-polish.patch` | Vertical tab polish. "+ New tab" row without ink drop, with the tabs' hover background (7% veil). Zen resize handle on the sidebar's `ResizeArea`: 5px bar with radius 4, from 8px below the top to 8px above the bottom, in `kColorSoraAccentButtonBackground`, invisible at rest and at 0.8 on hover, focus or drag (200ms delay to appear, 200ms ease-in-out); double-click resets to 186px. Pressed tab at `scale(0.98)` for 100ms, on a layer that `TabCollectionAnimatingLayoutManager` does not destroy while it lasts (`kSoraKeepLayerKey`). Opening and closing a tab with opacity and 0.95 scale, inside Chromium's 200ms layout animation and finishing in 120ms/100ms. Close "X" drawn with two 1.5px bars that go from 0°/12px to 45°/15px in 120ms each time the button appears. Favicon without throbber (the "Loading..." title remains) and discarded tab with favicon and title at 50%, without the ring or the shrunken favicon. Vertical tabs only. |
+| `sora/split-view.patch` | Zen Split view on top of Chromium's native split (2 tabs). With the page as a card (vertical tabs, not fullscreen), each pane becomes its own card with the 5px radius and Zen shadow (painted by `MultiContentsBackgroundView`, so it also shows in the gap), the panes take the place of the single card and sit 8px apart; the pane outline (Chromium's, 1px) touches the card from outside. The resize handle is the gap, invisible (the grip only shows with keyboard focus), and Chromium's mini toolbar is gone. In the tab list, the split becomes a single tab-shaped row: selected tab background when active, a 1px × 16px separator when not, and the active pane's tab with a 28px highlight (text at 4.8%/9%). Spec in section 12 of `zen-spec.md`. |
+| `sora/workspaces-polish.patch` | Workspace polish. No theme: a gray group is a workspace without a theme, and `BrowserWidget` ignores the focus mode color for it, so the system accent (or the Customize Chrome color) shows; the default workspace starts gray, and choosing gray in the editor removes the theme. The active workspace's color follows the editor immediately (Chromium only updates it when switching groups). Icon: an emoji at the start of the name, followed by a space ("🚀 Work"), stays in the group title and therefore comes back with the session; it shows in the indicator and the footer in place of the dot (14px; inactive in gray at 70%). Switching: the tab list slides in from the side of the new workspace (full width, 250ms, strong ease-out instead of the no-bounce spring), clipped to the sidebar; no theme cross-fade. Alt+1…9 and Alt+0 go to the 1st…10th workspace (top row only; Windows only), selecting the last tab used in it. Closing the last tab of the active workspace reopens the workspace in the same place, with its name and color, in a new tab (Chromium deletes the group with its last tab; deleting from the editor or closing the window still deletes it). Indicator as in Zen: double-clicking the name renames it in place (Enter or leaving saves, Esc cancels, an empty name is ignored), double-clicking the icon opens the editor; right-click, Enter and Space open the editor; a single click does nothing. |
+| `sora/glance-polish.patch` | Glance polish. Buttons in the Zen accent color (`kColorSoraAccent`: background `#1c1c1c`/`#e2e2e2` with 4% of it, icon in it), hover `#292929`/`#cccccc` with scale 1.02 and pressed 0.98 (50ms). Open: the card flies in an arc from the click point (the browser does not know the link's rectangle; 24px square) to its place, on a spring with bounce 0.2 that stops at 350ms, without relayout of the page (`SetNativeViewSize`); the page comes in over 87.5ms; the tab behind shrinks to 0.97 (transform on the page's aura window) while the 70% veil appears; the buttons come in with opacity and 20px over 200ms after 150ms. Close: arc back, page fades out in 0.15s, buttons in 120ms, tab behind returns in 233ms. Esc with a page element focused turns the X red `rgb(220,53,69)` with "Confirm" for 3s; a second Esc closes. Ctrl+W and Ctrl+F4 close only the Glance (Glance's `PreHandleKeyboardEvent`). "Open Link in Glance" item in the context menu of http(s) links. The Glance page gets the tab helpers that are not yet in `TabFeatures` (autofill, zoom, infobars, session id; `friend` in `tab_helpers.h`) and `alert`/`confirm`/`prompt` as window dialogs, as in DevTools. |
+| `sora/app-icon.patch` | Bumps `kCurrentProfileIconVersion` to 11, so Windows profile shortcuts are rebuilt with the new icon (as required by Chromium's `win/README`). The icons themselves are not a patch: see "Icon" below. |
+| `sora/strings.patch` | Sora's own strings in `chrome/app/sora_strings.grdp` (included in `generated_resources.grd`), with the pt-BR translation in the `.xtb`: name of a new workspace ("Space"), tooltip of the workspaces "+", the compact mode button, the "Open link in Glance" context menu item and Glance's "Confirm". Replaces the literals from the earlier patches with the messages. Other languages fall back to English (`fallback_to_english`). Each translation's id is the fingerprint of the English text (grit's `tclib.GenerateMessageId`): change the text and the id changes. |
+| `sora/tab-close-box.patch` | Vertical tab close button box as in Zen: 24×24 with radius 8 instead of the circle (ink drop and focus ring), 10% veil on hover and 20% when pressed. Only where Zen's "X" is enabled (`SetSoraAnimatedCross`). |
 
-### Textos da interface
+### UI strings
 
-O nome "Chromium" está escrito por extenso em cada mensagem de `chromium_strings.grd`
-(e `settings_chromium_strings.grdp`, `components_chromium_strings.grd`) e nas traduções `.xtb`;
-o grit não tem variável para ele e o `BRANDING` só vale para os recursos do executável. Um patch
-disso teria milhares de linhas, então a troca é um script: `sora/tools/rebrand_strings.py`, que o
-`build.py` roda logo depois dos patches (passo marcado "Sora:"; junto com a cópia dos ícones, as
-únicas mudanças no arquivo do upstream). Ele troca "Chromium" por "Sora" só no texto das mensagens (não em atributos, `<ph>`,
-"Chromium Authors", "Chromium OS"/"ChromiumOS", `Chromium.exe`, minúsculas) e remapeia os ids
-das traduções, que são a impressão digital do texto em inglês, usando o grit da árvore. É
-idempotente. Para testar numa árvore parcial: minitree com os `.grd`/`.grdp`, alguns `.xtb` e
-`tools/grit`, e `python3 sora/tools/rebrand_strings.py <árvore>`.
+The name "Chromium" is spelled out in each message of `chromium_strings.grd`
+(and `settings_chromium_strings.grdp`, `components_chromium_strings.grd`) and in the `.xtb` translations;
+grit has no variable for it and `BRANDING` only applies to the executable's resources. A patch
+for that would be thousands of lines long, so the replacement is a script: `sora/tools/rebrand_strings.py`, which
+`build.py` runs right after the patches (step marked "Sora:"; together with copying the icons, the
+only changes to the upstream file). It replaces "Chromium" with "Sora" only in message text (not in attributes, `<ph>`,
+"Chromium Authors", "Chromium OS"/"ChromiumOS", `Chromium.exe`, lowercase) and remaps the ids
+of the translations, which are the fingerprint of the English text, using the tree's grit. It is
+idempotent. To test on a partial tree: minitree with the `.grd`/`.grdp` files, a few `.xtb` files and
+`tools/grit`, then `python3 sora/tools/rebrand_strings.py <tree>`.
 
-### Ícone
+### Icon
 
-Amanhecer: quadrado de cantos arredondados (224/256, raio 52) com céu azul `#2F6FE4`→`#8EC4FF`,
-sol branco nascendo e horizonte `#FFA27C`→`#EE6E8C`. Fontes em `sora/branding/icon/` (`sora.svg`
-e `sora-mono.svg`, a versão de uma cor). `sora/tools/render_icons.py` (precisa de `cairosvg` e
-`pillow`) gera em `sora/branding/theme/` os PNGs, o `chromium.ico` (16, 32, 48 e 256) e os blocos
-do menu Iniciar, nos mesmos caminhos de `chrome/app/theme/`; o `build.py` copia essa pasta por
-cima da árvore depois dos patches. Arquivo binário não cabe em patch de texto, por isso a cópia.
-Ainda com o ícone do Chromium: `chromium_doc.ico`, `chromium_pdf.ico`, `app_list.ico`,
-`incognito.ico`, os de Linux/Mac/ChromeOS e os `webstore_icon*`.
+Dawn: a rounded square (224/256, radius 52) with a blue sky `#2F6FE4`→`#8EC4FF`,
+a rising white sun and a `#FFA27C`→`#EE6E8C` horizon. Sources in `sora/branding/icon/` (`sora.svg`
+and `sora-mono.svg`, the single-color version). `sora/tools/render_icons.py` (requires `cairosvg` and
+`pillow`) generates in `sora/branding/theme/` the PNGs, the `.ico` files (16, 32, 48 and 256) and the
+Start menu tiles, at the same paths as in `chrome/app/theme/`; `build.py` copies that folder over
+the tree after the patches. A binary file does not fit in a text patch, hence the copy.
+The HTML and PDF document icons (`chromium_doc.ico`, `chromium_pdf.ico`) are a page with the
+Sora icon, built from `doc-page.svg` and `pdf-label.svg`. `incognito.ico` carries no
+branding and stays Chromium's. Still using the Chromium icon: `app_list.ico`, the
+Linux/Mac/ChromeOS ones and the `webstore_icon*` files.
 
-Nenhum patch foi compilado ainda. O primeiro build vai mostrar os erros de compilação e os
-ajustes de cor que faltam.
+No patch has been compiled yet. The first build will show the compile errors and the
+color adjustments still missing.
 
-O que falta fazer está em [`roadmap/README.md`](../roadmap/README.md).
+What is left to do is in [`roadmap/README.md`](../roadmap/README.md).

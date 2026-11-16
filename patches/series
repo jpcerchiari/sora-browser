@@ -49,3 +49,5 @@ sora/split-view.patch
 sora/workspaces-polish.patch
 sora/glance-polish.patch
 sora/app-icon.patch
+sora/strings.patch
+sora/tab-close-box.patch

@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <path d="M56 18H162L210 66V230A10 10 0 0 1 200 240H56A10 10 0 0 1 46 230V28A10 10 0 0 1 56 18Z" fill="#000" fill-opacity=".18" transform="translate(0 3)"/>
+  <path d="M56 18H162L210 66V230A10 10 0 0 1 200 240H56A10 10 0 0 1 46 230V28A10 10 0 0 1 56 18Z" fill="#F7F7F7"/>
+  <path d="M162 18V56A10 10 0 0 0 172 66H210Z" fill="#E1E1E1"/>
+</svg>

@@ -1,0 +1,74 @@
+diff --git a/chrome/browser/ui/views/tabs/tab/tab_close_button.cc b/chrome/browser/ui/views/tabs/tab/tab_close_button.cc
+index 2c65fba..7675aa6 100644
+--- a/chrome/browser/ui/views/tabs/tab/tab_close_button.cc
++++ b/chrome/browser/ui/views/tabs/tab/tab_close_button.cc
+@@ -4,7 +4,9 @@
+ 
+ #include "chrome/browser/ui/views/tabs/tab/tab_close_button.h"
+ 
++#include <algorithm>
+ #include <memory>
++#include <optional>
+ 
+ #include "base/memory/raw_ptr.h"
+ #include "base/time/time.h"
+@@ -27,8 +29,10 @@
+ #include "ui/gfx/color_utils.h"
+ #include "ui/gfx/geometry/insets.h"
+ #include "ui/gfx/geometry/rect_f.h"
++#include "ui/gfx/geometry/rrect_f.h"
+ #include "ui/gfx/geometry/size.h"
+ #include "ui/gfx/geometry/skia_conversions.h"
++#include "ui/gfx/geometry/vector2d_f.h"
+ #include "ui/gfx/image/canvas_image_source.h"
+ #include "ui/gfx/image/image_skia_operations.h"
+ #include "ui/gfx/scoped_canvas.h"
+@@ -67,6 +71,31 @@ constexpr base::TimeDelta kSoraCrossDuration = base::Milliseconds(120);
+ // FAST_OUT_SLOW_IN is the closest curve to CSS `ease`.
+ constexpr gfx::Tween::Type kSoraCrossTween = gfx::Tween::FAST_OUT_SLOW_IN;
+ 
++// Sora: Zen's close button box (.tab-close-button): 24x24 with an 8px radius,
++// a 10% veil on hover and 20% while pressed.
++constexpr float kSoraCloseBoxSize = 24.0f;
++constexpr float kSoraCloseBoxRadius = 8.0f;
++constexpr float kSoraCloseHoverOpacity = 0.10f;
++constexpr float kSoraClosePressedOpacity = 0.20f;
++
++// Sora: the 24x24 box centred in the button, for the ink drop and focus ring.
++class SoraCloseBoxPathGenerator : public views::HighlightPathGenerator {
++ public:
++  SoraCloseBoxPathGenerator() = default;
++  SoraCloseBoxPathGenerator(const SoraCloseBoxPathGenerator&) = delete;
++  SoraCloseBoxPathGenerator& operator=(const SoraCloseBoxPathGenerator&) =
++      delete;
++
++  // views::HighlightPathGenerator:
++  std::optional<gfx::RRectF> GetRoundRect(const gfx::RectF& rect) override {
++    const float size =
++        std::min({kSoraCloseBoxSize, rect.width(), rect.height()});
++    gfx::RectF box(size, size);
++    box.set_origin(rect.CenterPoint() - gfx::Vector2dF(size / 2, size / 2));
++    return gfx::RRectF(box, kSoraCloseBoxRadius);
++  }
++};
++
+ // Sora: the "X" at `progress` (0 = flat bar, 1 = cross) in a square of `size`.
+ class SoraCrossImageSource : public gfx::CanvasImageSource {
+  public:
+@@ -218,6 +247,16 @@ void TabCloseButton::SetSoraAnimatedCross(bool animated_cross) {
+   }
+   sora_cross_animation_ =
+       animated_cross ? std::make_unique<SoraCrossAnimation>(this) : nullptr;
++  // Sora: Zen's box replaces the circle; vertical tabs never turn this off
++  // again, so the circle is not restored.
++  if (animated_cross) {
++    views::InkDrop::Get(this)->SetHighlightOpacity(kSoraCloseHoverOpacity);
++    views::InkDrop::Get(this)->SetVisibleOpacity(kSoraClosePressedOpacity);
++    views::HighlightPathGenerator::Install(
++        this, std::make_unique<SoraCloseBoxPathGenerator>());
++    views::FocusRing::Get(this)->SetPathGenerator(
++        std::make_unique<SoraCloseBoxPathGenerator>());
++  }
+   UpdateIcon();
+ }
+ 

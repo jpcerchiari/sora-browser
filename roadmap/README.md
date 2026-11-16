@@ -1,140 +1,148 @@
 # Roadmap
 
-O que já entrou e o que falta no Sora Browser. Cada item vira um patch em
-[`patches/sora/`](../patches/sora/). Antes de escrever código novo, ver se o Chromium já tem
-o recurso: estender o que existe custa bem menos que reimplementar.
+What has landed in Sora Browser and what is still missing. Each item becomes a patch in
+[`patches/sora/`](../patches/sora/). Before writing new code, check whether Chromium already has
+the feature: extending what exists costs far less than reimplementing it.
 
-## Feito
-- [x] Base no ungoogled-chromium-windows (Chromium 157.0.8103.78).
-- [x] Marca: nome, pasta de dados, ProgIDs e esquema `sora:` (`branding.patch`).
-- [x] Abas verticais por padrão (`vertical-tabs-by-default.patch`).
-- [x] Paleta do Zen: moldura, barra, abas, texto e barra de endereço (`color-mixer.patch`).
-- [x] Página como cartão flutuante com margem, cantos e sombra (`floating-contents.patch`).
-- [x] Medidas da lateral e das abas (`vertical-tab-metrics.patch`).
-- [x] Barra única no topo da lateral, em duas linhas (`sidebar-toolbar.patch`).
-- [x] Formas dos botões e da barra de endereço (`toolbar-shapes.patch`).
-- [x] Fonte das abas e botão de fechar só no hover (`vertical-tab-style.patch`).
-- [x] Botões da barra com ícone a 70% e hover de 7% (`color-mixer.patch`).
-- [x] Barra de endereço parada: só o domínio, peso 500, ícones que o Zen esconde (`omnibox-idle.patch`).
-- [x] Lateral sem a fileira nativa, "+ Nova aba" no topo e rodapé (`sidebar-rows.patch`).
-- [x] Lista de resultados com o visual do Zen (`omnibox-results.patch`).
-- [x] Barra de endereço flutuante ao abrir pelo teclado ou nova aba (`floating-urlbar.patch`).
-- [x] Essentials: fixadas em grade com o visual do Zen (`essentials.patch`).
-- [x] Botões da janela escondidos numa faixa de 8px que cresce no hover; barra dentro do painel do compacto (`window-controls.patch`).
-- [x] Modo compacto com painel flutuante e faixa de 5px (`compact-mode.patch`).
-- [x] Workspaces sobre o modo foco de grupos de abas: indicador, ícones e "+" no rodapé (`workspaces.patch`).
-- [x] Glance: Alt+clique abre o link num cartão flutuante com fechar, abrir como aba e split (`glance.patch`).
-- [x] Cor de destaque derivada do sistema como no Zen, com a cor do workspace vencendo (`frame-polish.patch`).
-- [x] Sombra exata do cartão, `0 3px 8px rgba(0,0,0,.24)` (`frame-polish.patch`).
-- [x] Cor própria do painel do modo compacto e contorno de 1px (`frame-polish.patch`).
-- [x] Hover da linha "+ Nova aba" com o véu de 7% das abas; os botões do rodapé já usavam o
-  véu de 7% da barra (`tabs-polish.patch`).
-- [x] Alça de redimensionar da lateral: 5px, cor de destaque, aparece no hover ou ao arrastar,
-  clique duplo volta aos 186px (`tabs-polish.patch`).
-- [x] Animações de pressionar (aba a 0.98), de abrir/fechar aba (opacidade e escala 0.95) e do
-  "X" de fechar (`tabs-polish.patch`).
-- [x] Aba descarregada a 50% sem escala de cinza nem anel; favicon no lugar do throbber
+## Done
+- [x] Based on ungoogled-chromium-windows (Chromium 157.0.8103.78).
+- [x] Branding: name, data folder, ProgIDs and `sora:` scheme (`branding.patch`).
+- [x] Vertical tabs by default (`vertical-tabs-by-default.patch`).
+- [x] Zen palette: frame, toolbar, tabs, text and address bar (`color-mixer.patch`).
+- [x] Page as a floating card with margin, corners and shadow (`floating-contents.patch`).
+- [x] Sidebar and tab metrics (`vertical-tab-metrics.patch`).
+- [x] Single toolbar at the top of the sidebar, in two rows (`sidebar-toolbar.patch`).
+- [x] Button and address bar shapes (`toolbar-shapes.patch`).
+- [x] Tab font and close button only on hover (`vertical-tab-style.patch`).
+- [x] Toolbar buttons with icons at 70% and a 7% hover (`color-mixer.patch`).
+- [x] Idle address bar: domain only, weight 500, icons that Zen hides (`omnibox-idle.patch`).
+- [x] Sidebar without the native row, "+ New tab" at the top, and footer (`sidebar-rows.patch`).
+- [x] Results list with the Zen look (`omnibox-results.patch`).
+- [x] Floating address bar when opened from the keyboard or a new tab (`floating-urlbar.patch`).
+- [x] Essentials: pinned tabs in a grid with the Zen look (`essentials.patch`).
+- [x] Window buttons hidden in an 8px strip that grows on hover; toolbar inside the compact panel (`window-controls.patch`).
+- [x] Compact mode with a floating panel and a 5px strip (`compact-mode.patch`).
+- [x] Workspaces on top of tab group focus mode: indicator, icons and "+" in the footer (`workspaces.patch`).
+- [x] Glance: Alt+click opens the link in a floating card with close, open as tab and split (`glance.patch`).
+- [x] Accent color derived from the system as in Zen, with the workspace color taking precedence (`frame-polish.patch`).
+- [x] Exact card shadow, `0 3px 8px rgba(0,0,0,.24)` (`frame-polish.patch`).
+- [x] Dedicated compact mode panel color and 1px outline (`frame-polish.patch`).
+- [x] "+ New tab" row hover with the tabs' 7% overlay; the footer buttons already used the
+  toolbar's 7% overlay (`tabs-polish.patch`).
+- [x] Sidebar resize handle: 5px, accent color, shown on hover or while dragging,
+  double-click resets to 186px (`tabs-polish.patch`).
+- [x] Animations for press (tab at 0.98), tab open/close (opacity and 0.95 scale) and the
+  close "X" (`tabs-polish.patch`).
+- [x] Discarded tab at 50% without grayscale or ring; favicon instead of the throbber
   (`tabs-polish.patch`).
-- [x] Split view com o visual do Zen sobre o split nativo: um cartão com sombra por painel, vão
-  de 8px, alça invisível, sem a mini barra; na lista, uma linha única com separador e destaque
-  do painel ativo (`split-view.patch`).
-- [x] Workspaces, acabamento: workspace padrão sem tema (cinza = sem tema, o destaque do sistema
-  aparece), emoji no começo do nome como ícone, troca deslizando a lista (0.25s), Alt+1…9 e
-  Alt+0, workspace que sobrevive ao fechar a última aba (reaberto com uma aba nova), renomear
-  com clique duplo no indicador (`workspaces-polish.patch`).
-- [x] Glance, acabamento: botões na cor de destaque com hover 1.02, arco a partir do clique com
-  mola, aba de trás em escala 0.97, botões entrando depois do arco, fechar em arco de volta,
-  confirmação do Esc, Ctrl+W fechando só o Glance, "Open Link in Glance" no menu de contexto,
-  tab helpers que não dependem de aba e diálogos JS (`glance-polish.patch`).
+- [x] Split view with the Zen look on top of the native split: one shadowed card per pane, 8px
+  gap, invisible handle, no mini toolbar; in the list, a single row with a separator and the
+  active pane highlighted (`split-view.patch`).
+- [x] Workspaces, polish: default workspace without a theme (gray = no theme, the system accent
+  shows), emoji at the start of the name as the icon, switching slides the list (0.25s), Alt+1…9
+  and Alt+0, a workspace that survives closing its last tab (reopened with a new tab), rename
+  by double-clicking the indicator (`workspaces-polish.patch`).
+- [x] Glance, polish: accent-colored buttons with a 1.02 hover, spring arc from the click point,
+  background tab at 0.97 scale, buttons entering after the arc, closing in a reverse arc,
+  Esc confirmation, Ctrl+W closing only the Glance, "Open Link in Glance" in the context menu,
+  tab helpers that do not depend on a tab, and JS dialogs (`glance-polish.patch`).
 
-## Primeiro build
-- [ ] Riscos a conferir: listados por patch nos relatórios; os principais estão em `sora/README.md`.
-- [ ] Compilar no Windows, no PC pessoal, e corrigir o que quebrar.
-- [ ] Conferir as cores com o Zen lado a lado, nos temas claro e escuro.
+## First build
+- [ ] Risks to check: listed per patch in the reports; the main ones are in `sora/README.md`.
+- [ ] Build on Windows, on the personal PC, and fix whatever breaks.
+- [ ] Compare the colors with Zen side by side, in the light and dark themes.
 
 ## Visual
-- [ ] Rodapé da lateral: trocar Downloads pela Biblioteca (os ícones dos workspaces e o "+" já
-  entraram; o botão de recolher sai do rodapé quando o modo compacto ganhar o botão da primeira linha).
-- [ ] Ações da página e chip do site só no hover da lateral (fade de 150ms); cursor padrão e padding interno de 4px na barra parada.
-- [ ] Barra flutuante, o que falta: chip de atalho em maiúsculas, seta de 28px do "ir para a aba",
-  sombra e raio do quadro dos resultados, fundo translúcido com desfoque, ícone e pílula do modo
-  de busca dentro do campo, animações, abrir ao digitar na página.
-- [ ] Fixadas: botão de reset no lugar do fechar e separador fixadas/normais.
-- [ ] Cantos squircle do cartão (`superellipse(2.3)`, raio 11.5): o recorte da página é o canto
-  redondo do compositor, então a sombra e os cantos pintados ficam redondos até haver recorte
-  por caminho.
-- [ ] Destaque do Zen no que ainda usa `kColorSysPrimary`: resultado
-  selecionado da barra de endereço (`--color-sys-primary` no CSS; trocar pelo
-  `kColorSoraAccentButtonBackground` se o popup carregar as cores do Chrome).
-- [ ] Animações de abrir/fechar aba, o que falta: hoje vão junto com a animação de layout do
-  Chromium (200ms, a linha cresce ou encolhe), terminando nos 0.12s/0.1s do Zen; curva easeOut.
-- [ ] Botão de fechar: caixa 24×24 com raio 8, fundo de 10% no hover e 20% pressionado,
-  `scale(0.97)` ao pressionar.
+- [ ] Sidebar footer: replace Downloads with the Library (the workspace icons and the "+" have
+  landed; the collapse button leaves the footer once compact mode gets the first-row button).
+- [ ] Page actions and site chip only on sidebar hover (150ms fade); default cursor and 4px inner padding on the idle bar.
+- [ ] Floating bar, what is missing: uppercase shortcut chip, 28px "switch to tab" arrow,
+  results frame shadow and radius, translucent background with blur, search mode icon and pill
+  inside the field, animations, opening when typing on the page.
+- [ ] Pinned tabs: reset button instead of close, and a pinned/normal separator.
+- [ ] Squircle card corners (`superellipse(2.3)`, radius 11.5): the page clip is the
+  compositor's rounded corner, so the shadow and painted corners stay rounded until there is
+  path clipping.
+- [ ] Zen accent in what still uses `kColorSysPrimary`: the selected
+  address bar result (`--color-sys-primary` in the CSS; switch to
+  `kColorSoraAccentButtonBackground` if the popup loads the Chrome colors).
+- [ ] Tab open/close animations, what is missing: today they run together with Chromium's
+  layout animation (200ms, the row grows or shrinks), ending at Zen's 0.12s/0.1s; easeOut curve.
+- [x] Close button: 24×24 box with radius 8, 10% background on hover and 20% when pressed
+  (`tab-close-box.patch`).
+- [ ] Close button: `scale(0.97)` when pressed (needs its own layer on the button, which today
+  shares layers with the ink drop).
 
-## Recursos do Zen
-Os recursos próprios do Zen entram no Sora também, não só o visual. O que no Zen é só o
-padrão do Firefox fica com o padrão do Chromium.
+## Zen features
+Zen's own features come to Sora too, not just the look. Whatever in Zen is just the Firefox
+default stays with the Chromium default.
 
-- [ ] Modo compacto, o que falta: mola com overshoot, revelar ao sair da janela perto da borda,
-  atalho Ctrl+Alt+C e texto do botão traduzido.
-- [ ] Essentials, o que falta: limite de 12, padding de 6/2px da grade, transição de 0.3s, ponto de não lido, favicon no lugar do indicador de áudio.
-- [ ] Workspaces, o que falta: cross-fade do tema na troca (precisa de uma foto da moldura ou de
-  interpolar as cores do `ColorProvider`), a lista que sai junto com a que entra na animação de
-  troca, escolher o ícone num seletor (hoje o emoji é digitado no nome, Win+.), menu do "+"
-  (pasta, split vazio, nova aba), reordenar arrastando, Ctrl + roda do mouse, lista de workspaces
-  no menu de contexto, workspaces iguais em todas as janelas, o mesmo grupo (e não um novo) ao
-  reabrir o workspace da última aba fechada, e textos traduzidos ("Space", "New space").
-- [ ] Split view, o que falta: contorno de 2px na cor do Zen só no painel ativo (hoje é o
-  contorno de 1px do Chromium, com cor também no inativo: `kColorMultiContentsView*ContentOutline`
-  no `sora_color_mixer.cc` e `kThickness`/`kCornerRadius` em `contents_container_outline.h`),
-  cabeçalho no hover com reorganizar e tirar do split, até 4 abas e layout em grade (o
-  `SplitTabCollection` do Chromium tem 2), vão de 9px entre linhas no empilhado, prévia do
-  arrastar no estilo do Zen (metade da área, sem atraso), atalhos Ctrl+Alt+V/H/U e
-  Ctrl+Shift+* (`accelerator_table.cc`), "Dividir link em nova aba" no menu de contexto de
-  links, linha empilhada com contorno na lateral recolhida.
-- [ ] Pastas de abas fixadas. Não cabem sem um modelo novo: as fixadas do Sora são as
-  essentials (globais) e os workspaces são grupos, e o Chromium não aninha coleções
-  (`PinnedTabCollection` e `TabGroupTabCollection` só aceitam `SPLIT`). Caminho: (1) fixadas por
-  workspace, uma seção no topo do grupo do workspace; (2) um tipo `FOLDER` em
-  `TabCollection::Type` (`components/tabs`), aceito dentro de `GROUP` e dentro de si mesmo
-  (5 níveis), com nome, recolhida e id, e as APIs no `TabStripModel` para criar, mover e
-  desagrupar; (3) os `switch` sobre o tipo (`TabModel::UpdateProperties()`, que já sobe pelos
-  ancestrais e então continua achando o grupo do workspace, `TabCollectionNode`,
-  `tab_strip_api`, observers); (4) uma `FolderView` na lateral (linha
-  com o ícone, recuo de 14px, recolher mostrando as ativas); (5) salvar na sessão
-  (`chrome/browser/sessions`, que não conhece pastas). Spec na seção 13 de
+- [ ] Compact mode, what is missing: spring with overshoot, reveal when leaving the window near
+  the edge, Ctrl+Alt+C shortcut.
+- [ ] Essentials, what is missing: limit of 12, 6/2px grid padding, 0.3s transition, unread dot, favicon instead of the audio indicator.
+- [ ] Workspaces, what is missing: theme cross-fade on switch (needs a snapshot of the frame or
+  interpolating the `ColorProvider` colors), the outgoing list moving together with the incoming
+  one in the switch animation, picking the icon from a picker (today the emoji is typed into the
+  name, Win+.), "+" menu (folder, empty split, new tab), drag to reorder, Ctrl + mouse wheel,
+  workspace list in the context menu, the same workspaces in every window, the same group (not a
+  new one) when reopening the workspace of the last closed tab.
+- [ ] Split view, what is missing: 2px outline in the Zen color on the active pane only (today
+  it is Chromium's 1px outline, colored on the inactive pane too: `kColorMultiContentsView*ContentOutline`
+  in `sora_color_mixer.cc` and `kThickness`/`kCornerRadius` in `contents_container_outline.h`),
+  header on hover with rearrange and remove from split, up to 4 tabs and grid layout (Chromium's
+  `SplitTabCollection` holds 2), 9px gap between rows when stacked, Zen-style drag
+  preview (half the area, no delay), Ctrl+Alt+V/H/U and
+  Ctrl+Shift+* shortcuts (`accelerator_table.cc`), "Split link into new tab" in the link
+  context menu, stacked row with an outline in the collapsed sidebar.
+- [ ] Pinned tab folders. They do not fit without a new model: Sora's pinned tabs are the
+  essentials (global) and workspaces are groups, and Chromium does not nest collections
+  (`PinnedTabCollection` and `TabGroupTabCollection` only accept `SPLIT`). Path: (1) per-workspace
+  pinned tabs, a section at the top of the workspace group; (2) a `FOLDER` type in
+  `TabCollection::Type` (`components/tabs`), accepted inside `GROUP` and inside itself
+  (5 levels), with name, collapsed state and id, and `TabStripModel` APIs to create, move and
+  ungroup; (3) the `switch` statements on the type (`TabModel::UpdateProperties()`, which already
+  walks up the ancestors and so still finds the workspace group, `TabCollectionNode`,
+  `tab_strip_api`, observers); (4) a `FolderView` in the sidebar (row
+  with the icon, 14px indent, collapsing shows the active tabs); (5) saving to the session
+  (`chrome/browser/sessions`, which does not know about folders). Spec in section 13 of
   `zen-spec.md`.
-- [ ] Glance, o que falta: Alt+clique em favoritos; arco a partir do retângulo do link (hoje um
-  quadrado de 24px no ponto do clique) e a captura do link voando junto; senhas e busca (Ctrl+F)
-  dentro do Glance, que hoje vêm das `TabFeatures` e só existem em aba (o Ctrl+F busca na aba de
-  trás); `beforeunload` ao fechar; textos "Confirm" e "Open Link in Glance" traduzidos (grd);
-  "abrir como aba" com a animação de 80%→100% do Zen.
+- [ ] Glance, what is missing: Alt+click on bookmarks; arc from the link's rectangle (today a
+  24px square at the click point) and the link snapshot flying along; passwords and find (Ctrl+F)
+  inside the Glance, which today come from `TabFeatures` and only exist in a tab (Ctrl+F searches
+  the background tab); `beforeunload` on close;
+  "open as tab" with Zen's 80%→100% animation.
 
-## Marca
-- [x] Ícone do app no Windows: PNGs, `chromium.ico` e blocos do Iniciar (`sora/branding/`).
-- [ ] Ícones de documento e PDF (`chromium_doc.ico`, `chromium_pdf.ico`), anônimo e os de Linux/Mac.
-- [x] Textos da interface: "Chromium" → "Sora" nas mensagens e traduções
-  (`sora/tools/rebrand_strings.py`, rodado pelo `build.py`).
-- [ ] GUIDs e CLSIDs de COM próprios (`chromium_install_modes.h` e os arquivos IDL).
+## Branding
+- [x] Windows app icon: PNGs, `chromium.ico` and Start tiles (`sora/branding/`).
+- [x] HTML and PDF document icons (`chromium_doc.ico`, `chromium_pdf.ico`).
+- [ ] Linux and Mac icons (once there are builds for those platforms).
+- [x] UI strings: "Chromium" → "Sora" in messages and translations
+  (`sora/tools/rebrand_strings.py`, run by `build.py`).
+- [x] Sora's own strings in a `.grdp`, with a pt-BR translation (`strings.patch`).
+- [ ] Translations of Sora's strings into other languages (today they fall back to English).
+- [x] Own Active Setup GUID and COM CLSIDs (`branding.patch`).
+- [ ] Own IIDs and TypeLibs: new interfaces in the `.idl` files of the elevation service and the
+  tracing service, and the MIDL output regenerated on Windows (`third_party/win_build_output/midl`).
+  Only matters for a system-level install alongside a Chromium.
 
-## Mapa: módulo do Zen → onde fica no Chromium
+## Map: Zen module → where it lives in Chromium
 
-Antes de escrever código novo, ver se o Chromium já tem o recurso atrás de uma flag.
-Vários recursos do Zen já existem lá, e estender o que existe custa bem menos que
-reimplementar. Tudo o que está marcado "verificar" precisa ser conferido na tag escolhida.
+Before writing new code, check whether Chromium already has the feature behind a flag.
+Several Zen features already exist there, and extending what exists costs far less than
+reimplementing it. Everything marked "verify" must be checked on the chosen tag.
 
-| Zen (`src/zen/…`) | O que faz | Chromium | Abordagem |
+| Zen (`src/zen/…`) | What it does | Chromium | Approach |
 |---|---|---|---|
-| `tokens/` (488 tokens, 185 externos) | cores, raios, espaçamentos, sombras | `ui/color/`, `chrome/browser/ui/color/chrome_color_mixer.cc`, `ChromeLayoutProvider` | **começado**: `sora_color_mixer.cc` com as superfícies principais |
-| `common/styles/zen-theme.css`, `common/zenThemeModifier.js` | gradiente do workspace, cor de destaque | `ThemeService`, `ui/color` mixers dinâmicos | estender o mixer de cor do usuário |
-| `tabs/` | abas verticais na barra lateral | `chrome/browser/ui/views/tabs/vertical/`, pref `vertical_tabs.enabled` | **feito**: ligadas por padrão |
-| `common/styles/zen-sidebar.css`, `zen-browser-ui.css` | barra lateral, conteúdo com borda arredondada e margem | `BrowserView`, `ContentsWebView`, `side_panel/` | patch no layout do `BrowserView` |
-| `compact-mode/` | esconde a barra lateral e a de ferramentas, que aparecem no hover | `BrowserView`, lógica parecida com o immersive mode | novo |
-| `spaces/`, `space-routing/` | workspaces com aba, cor e ícone próprios | tab groups e saved tab groups (verificar) | novo, apoiado em tab groups |
-| `folders/`, `live-folders/` | pastas de abas fixadas | nenhum: coleções não aninham, grupos já são os workspaces | novo tipo de coleção (ver Recursos do Zen) |
-| `split-view/` | duas ou mais abas lado a lado | split tabs (`MultiContentsView`, `SplitTabCollection`, 2 abas) | **começado**: visual do Zen sobre o nativo |
-| `glance/` | prévia do link numa janela flutuante | link preview (verificar) | estender ou novo |
-| `urlbar/` | omnibox flutuante no centro | `chrome/browser/ui/views/omnibox/` | patch |
-| `media/` | controle de mídia na barra lateral | Global Media Controls | reaproveitar |
-| `downloads/`, `little-window/`, `share/` | animação de download, janela pequena, compartilhar | vários | depois do núcleo |
-| `boosts/`, `mods/`, `library/`, `welcome/` | CSS por site, temas da comunidade, biblioteca, onboarding | — | fora do primeiro marco |
+| `tokens/` (488 tokens, 185 external) | colors, radii, spacing, shadows | `ui/color/`, `chrome/browser/ui/color/chrome_color_mixer.cc`, `ChromeLayoutProvider` | **started**: `sora_color_mixer.cc` with the main surfaces |
+| `common/styles/zen-theme.css`, `common/zenThemeModifier.js` | workspace gradient, accent color | `ThemeService`, dynamic `ui/color` mixers | extend the user color mixer |
+| `tabs/` | vertical tabs in the sidebar | `chrome/browser/ui/views/tabs/vertical/`, pref `vertical_tabs.enabled` | **done**: on by default |
+| `common/styles/zen-sidebar.css`, `zen-browser-ui.css` | sidebar, content with rounded border and margin | `BrowserView`, `ContentsWebView`, `side_panel/` | patch the `BrowserView` layout |
+| `compact-mode/` | hides the sidebar and toolbar, which appear on hover | `BrowserView`, logic similar to immersive mode | new |
+| `spaces/`, `space-routing/` | workspaces with their own tabs, color and icon | tab groups and saved tab groups (verify) | new, built on tab groups |
+| `folders/`, `live-folders/` | pinned tab folders | none: collections do not nest, groups are already the workspaces | new collection type (see Zen features) |
+| `split-view/` | two or more tabs side by side | split tabs (`MultiContentsView`, `SplitTabCollection`, 2 tabs) | **started**: Zen look on top of the native one |
+| `glance/` | link preview in a floating window | link preview (verify) | extend or new |
+| `urlbar/` | floating omnibox in the center | `chrome/browser/ui/views/omnibox/` | patch |
+| `media/` | media controls in the sidebar | Global Media Controls | reuse |
+| `downloads/`, `little-window/`, `share/` | download animation, little window, share | various | after the core |
+| `boosts/`, `mods/`, `library/`, `welcome/` | per-site CSS, community themes, library, onboarding | — | out of the first milestone |

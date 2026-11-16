@@ -59,7 +59,7 @@ Zen é apenas o comportamento padrão do Firefox continua com o padrão do Chrom
 
 Todos os recursos abaixo têm patch escrito e verificado contra o código do Chromium, e aguardam
 o primeiro build para validação. A especificação visual de referência está em
-[`sora/zen-spec.md`](sora/zen-spec.md).
+[`sora/zen-spec.md`](sora/zen-spec.md) (em inglês).
 
 ### Interface
 
@@ -122,7 +122,7 @@ O build também pode ser executado no GitHub Actions, pelo workflow
 para respeitar o limite de tempo dos runners e publica o resultado como artefato.
 
 Para escrever ou alterar um patch sem baixar o código completo do Chromium, consulte o
-[guia de desenvolvimento](sora/README.md#como-escrever-um-patch-sem-a-árvore-do-chromium).
+[guia de desenvolvimento](sora/README.md#writing-a-patch-without-the-chromium-tree) (em inglês).
 
 ## Estrutura do repositório
 

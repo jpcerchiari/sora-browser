@@ -58,7 +58,7 @@ Firefox's default behavior in Zen stays with Chromium's default.
 
 Every feature below has a patch written and checked against Chromium's source, and is awaiting
 the first build for validation. The reference visual specification is in
-[`sora/zen-spec.md`](sora/zen-spec.md) (in Portuguese).
+[`sora/zen-spec.md`](sora/zen-spec.md).
 
 ### Interface
 
@@ -121,7 +121,7 @@ The build can also run on GitHub Actions through the
 stages to stay within the runners' time limit and publishes the result as an artifact.
 
 To write or change a patch without downloading Chromium's full source, see the
-[development guide](sora/README.md#como-escrever-um-patch-sem-a-árvore-do-chromium) (in Portuguese).
+[development guide](sora/README.md#writing-a-patch-without-the-chromium-tree).
 
 ## Repository layout
 
