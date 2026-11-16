@@ -1,4 +1,5 @@
 <div align="center">
+    <img src="sora/branding/icon/sora.svg" width="128" alt="Ícone do Sora Browser">
     <h1>Sora Browser</h1>
     <p>
         Um navegador calmo, com a cara do Zen e o motor do Chromium.

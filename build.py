@@ -237,6 +237,8 @@ def main():
         )
         # Sora: "Chromium" -> "Sora" in the UI strings (sora/tools/rebrand_strings.py)
         subprocess.run([sys.executable, str(_ROOT_DIR / 'sora' / 'tools' / 'rebrand_strings.py'), str(source_tree)], check=True)
+        # Sora: app icons over chrome/app/theme (sora/tools/render_icons.py)
+        shutil.copytree(_ROOT_DIR / 'sora' / 'branding' / 'theme', source_tree / 'chrome' / 'app' / 'theme', dirs_exist_ok=True)
 
         # Substitute domains
         domain_substitution_list = (_ROOT_DIR / 'ungoogled-chromium' / 'domain_substitution.list') if args.tarball else (_ROOT_DIR  / 'domain_substitution.list')

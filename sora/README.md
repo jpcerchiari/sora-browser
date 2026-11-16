@@ -80,6 +80,7 @@ A especificação visual do Zen que eles seguem está em [`zen-spec.md`](zen-spe
 | `sora/split-view.patch` | Split view do Zen sobre o split nativo do Chromium (2 abas). Com a página como cartão (abas verticais, fora da tela cheia), cada painel vira um cartão próprio com o raio de 5px e a sombra do Zen (pintada pelo `MultiContentsBackgroundView`, então aparece também no vão), os painéis ocupam o lugar do cartão único e ficam a 8px um do outro; o contorno do painel (o do Chromium, 1px) encosta no cartão por fora. A alça de redimensionar é o vão, invisível (a pegada só aparece com foco do teclado), e a mini barra do Chromium some. Na lista de abas, o split vira uma linha única no formato de aba: fundo da aba selecionada quando ativo, separador de 1px × 16px quando não, e a aba do painel ativo com um destaque de 28px (texto a 4.8%/9%). Spec na seção 12 de `zen-spec.md`. |
 | `sora/workspaces-polish.patch` | Acabamento dos workspaces. Sem tema: grupo cinza é workspace sem tema, e o `BrowserWidget` ignora a cor do modo foco para ele, então aparece o destaque do sistema (ou a cor de Personalizar o Chrome); o workspace padrão nasce cinza, e escolher cinza no editor tira o tema. A cor do workspace ativo acompanha o editor na hora (o Chromium só a atualiza ao trocar de grupo). Ícone: um emoji no começo do nome, seguido de espaço ("🚀 Trabalho"), fica no título do grupo e por isso volta com a sessão; aparece no indicador e no rodapé no lugar do ponto (14px; inativo em cinza a 70%). Troca: a lista de abas entra deslizando do lado do workspace novo (largura inteira, 250ms, ease-out forte no lugar da mola sem bounce), recortada à lateral; sem o cross-fade do tema. Alt+1…9 e Alt+0 vão para o 1º…10º workspace (só a fileira de cima; só no Windows), selecionando a última aba usada nele. Fechar a última aba do workspace ativo reabre o workspace no mesmo lugar, com nome e cor, numa aba nova (o Chromium apaga o grupo com a última aba; apagar pelo editor ou fechar a janela continua apagando). Indicador como no Zen: clique duplo no nome renomeia ali mesmo (Enter ou sair salva, Esc cancela, nome vazio é ignorado), clique duplo no ícone abre o editor; clique direito, Enter e Espaço abrem o editor; clique simples não faz nada. |
 | `sora/glance-polish.patch` | Acabamento do Glance. Botões na cor de destaque do Zen (`kColorSoraAccent`: fundo `#1c1c1c`/`#e2e2e2` com 4% dela, ícone nela), hover `#292929`/`#cccccc` com escala 1.02 e pressionado 0.98 (50ms). Abrir: o cartão voa em arco do ponto do clique (o navegador não conhece o retângulo do link; quadrado de 24px) até o lugar, numa mola com bounce 0.2 que para em 350ms, sem relayout da página (`SetNativeViewSize`); a página entra em 87.5ms; a aba de trás encolhe para 0.97 (transform na janela aura da página) enquanto o véu de 70% aparece; os botões entram com opacidade e 20px em 200ms depois de 150ms. Fechar: arco de volta, página some em 0.15s, botões em 120ms, aba de trás volta em 233ms. Esc com um elemento da página focado deixa o X vermelho `rgb(220,53,69)` com "Confirm" por 3s; o segundo Esc fecha. Ctrl+W e Ctrl+F4 fecham só o Glance (`PreHandleKeyboardEvent` do Glance). Item "Open Link in Glance" no menu de contexto de links http(s). A página do Glance ganha os tab helpers que ainda não estão nas `TabFeatures` (autofill, zoom, infobars, id de sessão; `friend` em `tab_helpers.h`) e `alert`/`confirm`/`prompt` como diálogos da janela, como no DevTools. Textos "Confirm" e "Open Link in Glance" ainda sem tradução. |
+| `sora/app-icon.patch` | Sobe `kCurrentProfileIconVersion` para 11, para os atalhos de perfil do Windows serem refeitos com o ícone novo (pedido no `win/README` do Chromium). Os ícones em si não são patch: ver "Ícone" abaixo. |
 
 ### Textos da interface
 
@@ -87,12 +88,23 @@ O nome "Chromium" está escrito por extenso em cada mensagem de `chromium_string
 (e `settings_chromium_strings.grdp`, `components_chromium_strings.grd`) e nas traduções `.xtb`;
 o grit não tem variável para ele e o `BRANDING` só vale para os recursos do executável. Um patch
 disso teria milhares de linhas, então a troca é um script: `sora/tools/rebrand_strings.py`, que o
-`build.py` roda logo depois dos patches (passo marcado "Sora:", a única mudança no arquivo do
-upstream). Ele troca "Chromium" por "Sora" só no texto das mensagens (não em atributos, `<ph>`,
+`build.py` roda logo depois dos patches (passo marcado "Sora:"; junto com a cópia dos ícones, as
+únicas mudanças no arquivo do upstream). Ele troca "Chromium" por "Sora" só no texto das mensagens (não em atributos, `<ph>`,
 "Chromium Authors", "Chromium OS"/"ChromiumOS", `Chromium.exe`, minúsculas) e remapeia os ids
 das traduções, que são a impressão digital do texto em inglês, usando o grit da árvore. É
 idempotente. Para testar numa árvore parcial: minitree com os `.grd`/`.grdp`, alguns `.xtb` e
 `tools/grit`, e `python3 sora/tools/rebrand_strings.py <árvore>`.
+
+### Ícone
+
+Amanhecer: quadrado de cantos arredondados (224/256, raio 52) com céu azul `#2F6FE4`→`#8EC4FF`,
+sol branco nascendo e horizonte `#FFA27C`→`#EE6E8C`. Fontes em `sora/branding/icon/` (`sora.svg`
+e `sora-mono.svg`, a versão de uma cor). `sora/tools/render_icons.py` (precisa de `cairosvg` e
+`pillow`) gera em `sora/branding/theme/` os PNGs, o `chromium.ico` (16, 32, 48 e 256) e os blocos
+do menu Iniciar, nos mesmos caminhos de `chrome/app/theme/`; o `build.py` copia essa pasta por
+cima da árvore depois dos patches. Arquivo binário não cabe em patch de texto, por isso a cópia.
+Ainda com o ícone do Chromium: `chromium_doc.ico`, `chromium_pdf.ico`, `app_list.ico`,
+`incognito.ico`, os de Linux/Mac/ChromeOS e os `webstore_icon*`.
 
 Nenhum patch foi compilado ainda. O primeiro build vai mostrar os erros de compilação e os
 ajustes de cor que faltam.

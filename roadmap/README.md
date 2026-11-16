@@ -111,7 +111,8 @@ padrão do Firefox fica com o padrão do Chromium.
   "abrir como aba" com a animação de 80%→100% do Zen.
 
 ## Marca
-- [ ] Logo e ícones (`chrome/app/theme/chromium/`).
+- [x] Ícone do app no Windows: PNGs, `chromium.ico` e blocos do Iniciar (`sora/branding/`).
+- [ ] Ícones de documento e PDF (`chromium_doc.ico`, `chromium_pdf.ico`), anônimo e os de Linux/Mac.
 - [x] Textos da interface: "Chromium" → "Sora" nas mensagens e traduções
   (`sora/tools/rebrand_strings.py`, rodado pelo `build.py`).
 - [ ] GUIDs e CLSIDs de COM próprios (`chromium_install_modes.h` e os arquivos IDL).
