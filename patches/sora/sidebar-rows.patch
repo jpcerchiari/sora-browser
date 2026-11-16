@@ -1,0 +1,534 @@
+diff --git a/chrome/browser/ui/views/frame/vertical_tab_strip_region_view.cc b/chrome/browser/ui/views/frame/vertical_tab_strip_region_view.cc
+index f3ab4f1..dcd218a 100644
+--- a/chrome/browser/ui/views/frame/vertical_tab_strip_region_view.cc
++++ b/chrome/browser/ui/views/frame/vertical_tab_strip_region_view.cc
+@@ -52,6 +52,7 @@
+ #include "chrome/browser/ui/views/tabs/common/tab_view.h"
+ #include "chrome/browser/ui/views/tabs/common/unpinned_tab_container_view.h"
+ #include "chrome/browser/ui/views/tabs/shared/drop_arrow.h"
++#include "chrome/browser/ui/views/tabs/shared/new_tab_button.h"
+ #include "chrome/browser/ui/views/tabs/vertical/top_container_button.h"
+ #include "chrome/browser/ui/views/tabs/vertical/vertical_tab_strip_bottom_container.h"
+ #include "chrome/browser/ui/views/tabs/vertical/vertical_tab_strip_focus_swipe_controller.h"
+@@ -64,16 +65,24 @@
+ #include "ui/base/interaction/element_tracker.h"
+ #include "ui/base/l10n/l10n_util.h"
+ #include "ui/base/metadata/metadata_impl_macros.h"
++#include "ui/color/color_provider.h"
+ #include "ui/compositor/layer.h"
++#include "ui/compositor/scoped_layer_animation_settings.h"
+ #include "ui/display/screen.h"
+ #include "ui/events/event.h"
++#include "ui/gfx/font_list.h"
++#include "ui/gfx/geometry/insets.h"
+ #include "ui/gfx/geometry/point.h"
++#include "ui/gfx/geometry/rect_f.h"
++#include "ui/gfx/geometry/transform.h"
++#include "ui/gfx/geometry/transform_util.h"
+ #include "ui/views/controls/button/label_button.h"
+ #include "ui/views/controls/focus_ring.h"
+ #include "ui/views/controls/resize_area.h"
+ #include "ui/views/focus/focus_manager.h"
+ #include "ui/views/interaction/element_tracker_views.h"
+ #include "ui/views/layout/delegating_layout_manager.h"
++#include "ui/views/layout/fill_layout.h"
+ #include "ui/views/layout/flex_layout.h"
+ #include "ui/views/layout/flex_layout_types.h"
+ #include "ui/views/layout/flex_layout_view.h"
+@@ -82,6 +91,7 @@
+ #include "ui/views/view.h"
+ #include "ui/views/view_class_properties.h"
+ #include "ui/views/view_utils.h"
++#include "ui/views/widget/widget.h"
+ 
+ namespace {
+ constexpr int kResizeAreaWidth = 5;
+@@ -115,6 +125,87 @@ constexpr double kVerticalTabsExpandOnHoverVelocityHeuristicThreshold = 0.25;
+ constexpr base::TimeDelta kVerticalTabsExpandOnHoverVelocityHeuristicEdgeDelay =
+     base::Milliseconds(200);
+ 
++// Sora: Zen's "+ New tab" row (sora/zen-spec.md, section 3). It takes the tab
++// box (height and radius come from the tab layout constants); the rest is here.
++constexpr int kSoraNewTabRowMargin = 2;         // Zen tab margin-block.
++constexpr int kSoraNewTabRowPadding = 8;        // Zen tab padding-inline.
++constexpr int kSoraNewTabRowIconSize = 16;
++constexpr int kSoraNewTabRowIconLabelSpacing = 10;  // Zen favicon end margin.
++constexpr int kSoraNewTabRowTitleSizeDelta = 2;     // 14px, like tab titles.
++constexpr float kSoraNewTabRowLabelOpacity = 0.7f;  // currentColor 70%.
++constexpr float kSoraNewTabRowPressedScale = 0.985f;
++constexpr base::TimeDelta kSoraNewTabRowPressDuration = base::Milliseconds(100);
++
++// Sora: the shared NewTabButton (same action, metrics and context menu) drawn
++// as a tab-like row: transparent until hovered, icon and label at the leading
++// edge, label at 70% of the tab text color, and a slight shrink while pressed.
++class SoraNewTabRow : public shared::NewTabButton {
++  METADATA_HEADER(SoraNewTabRow, shared::NewTabButton)
++
++ public:
++  explicit SoraNewTabRow(BrowserWindowInterface* browser)
++      : shared::NewTabButton(
++            browser,
++            GetLayoutConstant(LayoutConstant::kVerticalTabHeight),
++            kSoraNewTabRowIconSize,
++            static_cast<float>(
++                GetLayoutConstant(LayoutConstant::kVerticalTabCornerRadius))) {
++    SetPaintTransparent(true);
++    SetHorizontalAlignment(gfx::ALIGN_LEFT);
++    SetInsets(gfx::Insets::VH(0, kSoraNewTabRowPadding));
++    SetImageLabelSpacing(kSoraNewTabRowIconLabelSpacing);
++    label()->SetFontList(
++        gfx::FontList().DeriveWithSizeDelta(kSoraNewTabRowTitleSizeDelta));
++    // The row is see-through, so the label gets grayscale text on its own
++    // layer, as TabStripFlatEdgeButton::SetShouldShowLabel() does.
++    label()->SetPaintToLayer();
++    label()->layer()->SetFillsBoundsOpaquely(false);
++    label()->SetSkipSubpixelRenderingOpacityCheck(true);
++    label()->SetSubpixelRenderingEnabled(false);
++    // TabStripFlatEdgeButton only manages its label when SetShouldShowLabel()
++    // is on, so this text stays put. IDS_NEW_TAB is "New &tab": drop the
++    // mnemonic the same way the action's tooltip does.
++    SetText(BrowserActions::GetCleanTitleAndTooltipText(
++        l10n_util::GetStringUTF16(IDS_NEW_TAB)));
++  }
++  SoraNewTabRow(const SoraNewTabRow&) = delete;
++  SoraNewTabRow& operator=(const SoraNewTabRow&) = delete;
++  ~SoraNewTabRow() override = default;
++
++  // views::View:
++  void OnThemeChanged() override {
++    shared::NewTabButton::OnThemeChanged();
++    const bool frame_active =
++        GetWidget() && GetWidget()->ShouldPaintAsActive();
++    const SkColor text_color = GetColorProvider()->GetColor(
++        frame_active ? kColorTabForegroundInactiveFrameActive
++                     : kColorTabForegroundInactiveFrameInactive);
++    SetEnabledTextColors(ui::ColorVariant(SkColorSetA(
++        text_color, base::ClampRound<SkAlpha>(SkColorGetA(text_color) *
++                                              kSoraNewTabRowLabelOpacity))));
++  }
++
++ protected:
++  // views::Button:
++  void StateChanged(ButtonState old_state) override {
++    shared::NewTabButton::StateChanged(old_state);
++    const bool pressed = GetState() == STATE_PRESSED;
++    if (!layer() || pressed == (old_state == STATE_PRESSED)) {
++      return;
++    }
++    ui::ScopedLayerAnimationSettings settings(layer()->GetAnimator());
++    settings.SetTransitionDuration(kSoraNewTabRowPressDuration);
++    layer()->SetTransform(
++        pressed ? gfx::TransformAboutPivot(
++                      gfx::RectF(GetLocalBounds()).CenterPoint(),
++                      gfx::Transform::MakeScale(kSoraNewTabRowPressedScale))
++                : gfx::Transform());
++  }
++};
++
++BEGIN_METADATA(SoraNewTabRow)
++END_METADATA
++
+ }  // namespace
+ 
+ DEFINE_CLASS_CUSTOM_ELEMENT_EVENT_TYPE(VerticalTabStripRegionView,
+@@ -162,6 +253,26 @@ VerticalTabStripRegionView::VerticalTabStripRegionView(
+   const int region_horizontal_padding =
+       GetLayoutConstant(LayoutConstant::kVerticalTabStripHorizontalPadding);
+ 
++  // Sora: "+ New tab" heads the tab list, as in Zen. It shows while the strip
++  // is expanded; collapsed, the bottom container's new tab button is used.
++  // The row is shown and hidden through a holder because action updates reset
++  // the button's own visibility.
++  auto sora_new_tab_row =
++      std::make_unique<SoraNewTabRow>(browser_view->browser());
++  sora_new_tab_row_pressed_subscription_ =
++      sora_new_tab_row->RegisterWillInvokeActionCallback(base::BindRepeating(
++          &VerticalTabStripRegionView::RecordNewTabButtonPressed,
++          base::Unretained(this)));
++  auto sora_new_tab_row_holder = std::make_unique<views::View>();
++  sora_new_tab_row_holder->SetLayoutManager(
++      std::make_unique<views::FillLayout>());
++  sora_new_tab_row_holder->AddChildView(std::move(sora_new_tab_row));
++  sora_new_tab_row_holder->SetProperty(
++      views::kMarginsKey,
++      gfx::Insets::VH(kSoraNewTabRowMargin, region_horizontal_padding));
++  sora_new_tab_row_ =
++      content_area_view_->AddChildView(std::move(sora_new_tab_row_holder));
++
+   auto* const top_button_separator =
+       content_area_view_->AddChildView(std::make_unique<FrameSeparator>());
+   // The TopContainer handles the padding distance to the separator so that we
+@@ -170,6 +281,9 @@ VerticalTabStripRegionView::VerticalTabStripRegionView(
+       views::kMarginsKey, gfx::Insets::VH(0, region_horizontal_padding));
+   top_button_separator->SetColorId(kColorTabDividerFrameActive);
+   top_button_separator->SetInactiveColorId(kColorTabDividerFrameInactive);
++  // Sora: Zen has no line under the strip's top buttons. The separator stays
++  // in the tree because AddTabStripView() inserts the tab strip after it.
++  top_button_separator->SetVisible(false);
+   top_button_separator_ = top_button_separator;
+ 
+   bottom_button_container_ = content_area_view_->AddChildView(
+@@ -427,8 +541,12 @@ views::ProposedLayout VerticalTabStripRegionView::CalculateProposedLayout(
+     button_available_size.set_width(button_available_size.width() -
+                                     2 * horizontal_padding);
+   }
++  // Sora: no top button row while the toolbar is in the sidebar.
++  const bool sora_hide_top_buttons = IsSoraToolbarInSidebar();
+   const gfx::Size button_size =
+-      top_button_container_->GetPreferredSize(button_available_size);
++      sora_hide_top_buttons
++          ? gfx::Size()
++          : top_button_container_->GetPreferredSize(button_available_size);
+   const gfx::Size tab_strip_size =
+       tab_strip_view() ? tab_strip_view()->GetPreferredSize() : gfx::Size();
+   const gfx::Size organizer_panel_size =
+@@ -453,7 +571,7 @@ views::ProposedLayout VerticalTabStripRegionView::CalculateProposedLayout(
+   // Lay out the top button container.
+   layout.child_layouts.push_back(
+       {.child_view = top_button_container_.get(),
+-       .visible = true,
++       .visible = !sora_hide_top_buttons,
+        .bounds = gfx::Rect(
+            horizontal_padding, 0,
+            blending_with_organizer_tray
+@@ -489,6 +607,13 @@ views::ProposedLayout VerticalTabStripRegionView::CalculateProposedLayout(
+ }
+ 
+ void VerticalTabStripRegionView::Layout(PassKey) {
++  // Sora: entering or leaving fullscreen moves the toolbar in or out of the
++  // sidebar without a collapse change, so drop the cached layout then.
++  if (const bool toolbar_in_sidebar = IsSoraToolbarInSidebar();
++      toolbar_in_sidebar != sora_toolbar_in_sidebar_) {
++    sora_toolbar_in_sidebar_ = toolbar_in_sidebar;
++    GetLayoutManager()->InvalidateLayout();
++  }
+   LayoutSuperclass<BaseTabStripRegionView>(this);
+ 
+   // Manually position the resize area as it overlaps views handled by the flex
+@@ -916,6 +1041,11 @@ void VerticalTabStripRegionView::OnCollapseStateChanged(
+     tab_strip_view()->SetCollapsedState(collapsed);
+   }
+ 
++  // Sora: swap the "+ New tab" row with the bottom new tab button, and show or
++  // hide the top button row along with the sidebar toolbar.
++  sora_new_tab_row_->SetVisible(!collapsed);
++  InvalidateLayout();
++
+   if ((state == tabs::VerticalTabStripCollapseState::kCollapsing) ||
+       (state == tabs::VerticalTabStripCollapseState::kExpanded &&
+        IsAnimatingSize())) {
+@@ -943,12 +1073,28 @@ void VerticalTabStripRegionView::OnCollapseStateChanged(
+ }
+ 
+ bool VerticalTabStripRegionView::IsCollapseButtonHovered() const {
++  // Sora: the footer's collapse toggle counts too.
++  if (bottom_button_container_) {
++    if (const views::View* const footer_collapse_button =
++            bottom_button_container_->GetSoraCollapseButton();
++        footer_collapse_button && footer_collapse_button->IsMouseHovered()) {
++      return true;
++    }
++  }
+   return SafeInvoke(top_button_container_.get())
+       .Then(&VerticalTabStripTopContainer::GetCollapseButton)
+       .Then(&views::View::IsMouseHovered)
+       .value_or(false);
+ }
+ 
++bool VerticalTabStripRegionView::IsSoraToolbarInSidebar() const {
++  // Same test as the toolbar: an expanded strip outside fullscreen, where the
++  // browser layout puts the top container in the sidebar column.
++  const views::Widget* const widget = GetWidget();
++  return !state_controller_->IsCollapsed() &&
++         !(widget && widget->IsFullscreen());
++}
++
+ gfx::Rect VerticalTabStripRegionView::GetTabStripDraggableBounds() const {
+   // Tabs should be draggable from the top of the tab strip to the bottom of the
+   // tab strip's max size, saving space for the bottom button container and
+diff --git a/chrome/browser/ui/views/frame/vertical_tab_strip_region_view.h b/chrome/browser/ui/views/frame/vertical_tab_strip_region_view.h
+index 85f1aaa..4550aa8 100644
+--- a/chrome/browser/ui/views/frame/vertical_tab_strip_region_view.h
++++ b/chrome/browser/ui/views/frame/vertical_tab_strip_region_view.h
+@@ -197,6 +197,11 @@ class VerticalTabStripRegionView final
+ 
+   bool IsCollapseButtonHovered() const;
+ 
++  // Sora: whether the toolbar sits at the top of the sidebar, mirroring
++  // ToolbarView::UpdateSoraSidebarMode() (sidebar-toolbar.patch). The strip's
++  // own top button row is hidden then, as Zen has none.
++  bool IsSoraToolbarInSidebar() const;
++
+   // Returns the bounds within which tabs can be dragged in the vertical tab
+   // strip.
+   gfx::Rect GetTabStripDraggableBounds() const override;
+@@ -227,6 +232,11 @@ class VerticalTabStripRegionView final
+   raw_ptr<views::View> content_area_view_ = nullptr;
+   raw_ptr<VerticalTabStripTopContainer> top_button_container_ = nullptr;
+   raw_ptr<views::Separator> top_button_separator_ = nullptr;
++  // Sora: holder of Zen's "+ New tab" row at the top of the tab list.
++  raw_ptr<views::View> sora_new_tab_row_ = nullptr;
++  base::CallbackListSubscription sora_new_tab_row_pressed_subscription_;
++  // Sora: last IsSoraToolbarInSidebar() seen by Layout().
++  bool sora_toolbar_in_sidebar_ = false;
+   raw_ptr<VerticalTabStripBottomContainer> bottom_button_container_ = nullptr;
+   raw_ptr<views::View> gemini_button_ = nullptr;
+   raw_ptr<views::ResizeArea> resize_area_ = nullptr;
+diff --git a/chrome/browser/ui/views/tabs/vertical/top_container_button.cc b/chrome/browser/ui/views/tabs/vertical/top_container_button.cc
+index 1029f4c..ec0a6b6 100644
+--- a/chrome/browser/ui/views/tabs/vertical/top_container_button.cc
++++ b/chrome/browser/ui/views/tabs/vertical/top_container_button.cc
+@@ -59,7 +59,9 @@ void TopContainerButton::UpdateIcon(const ui::ImageModel& icon_image) {
+ 
+   const ui::ImageModel image_model = ui::ImageModel::FromVectorIcon(
+       *icon_image.GetVectorIcon().vector_icon(), GetForegroundColor(),
+-      GetLayoutConstant(LayoutConstant::kVerticalTabStripButtonIconSize));
++      // Sora: icon size override, see SetIconSize().
++      icon_size_.value_or(
++          GetLayoutConstant(LayoutConstant::kVerticalTabStripButtonIconSize)));
+ 
+   SetImageModel(views::Button::STATE_NORMAL, image_model);
+   SetImageModel(views::Button::STATE_HOVERED, image_model);
+diff --git a/chrome/browser/ui/views/tabs/vertical/top_container_button.h b/chrome/browser/ui/views/tabs/vertical/top_container_button.h
+index 87dd1fb..f4809ef 100644
+--- a/chrome/browser/ui/views/tabs/vertical/top_container_button.h
++++ b/chrome/browser/ui/views/tabs/vertical/top_container_button.h
+@@ -5,6 +5,8 @@
+ #ifndef CHROME_BROWSER_UI_VIEWS_TABS_VERTICAL_TOP_CONTAINER_BUTTON_H_
+ #define CHROME_BROWSER_UI_VIEWS_TABS_VERTICAL_TOP_CONTAINER_BUTTON_H_
+ 
++#include <optional>
++
+ #include "ui/base/metadata/metadata_impl_macros.h"
+ #include "ui/views/controls/button/label_button.h"
+ 
+@@ -18,6 +20,10 @@ class TopContainerButton : public views::LabelButton {
+ 
+   void UpdateIcon(const ui::ImageModel& icon_image);
+ 
++  // Sora: overrides kVerticalTabStripButtonIconSize. Must be called before the
++  // button is bound to its action.
++  void SetIconSize(int icon_size) { icon_size_ = icon_size; }
++
+   void SetDelayIconUpdates(bool delay);
+   void ApplyPendingIcon();
+ 
+@@ -34,6 +40,8 @@ class TopContainerButton : public views::LabelButton {
+   ui::ColorId GetForegroundColor() const;
+ 
+   bool delay_icon_updates_ = false;
++  // Sora: see SetIconSize().
++  std::optional<int> icon_size_;
+   std::optional<ui::ImageModel> pending_icon_image_;
+ 
+   base::CallbackListSubscription paint_as_active_subscription_;
+diff --git a/chrome/browser/ui/views/tabs/vertical/vertical_tab_strip_bottom_container.cc b/chrome/browser/ui/views/tabs/vertical/vertical_tab_strip_bottom_container.cc
+index 64150f8..ccae811 100644
+--- a/chrome/browser/ui/views/tabs/vertical/vertical_tab_strip_bottom_container.cc
++++ b/chrome/browser/ui/views/tabs/vertical/vertical_tab_strip_bottom_container.cc
+@@ -5,16 +5,34 @@
+ #include "chrome/browser/ui/views/tabs/vertical/vertical_tab_strip_bottom_container.h"
+ 
+ #include "base/functional/bind.h"
++#include "chrome/browser/ui/actions/chrome_action_id.h"
+ #include "chrome/browser/ui/browser_element_identifiers.h"
+ #include "chrome/browser/ui/layout_constants.h"
+ #include "chrome/browser/ui/tabs/vertical_tab_strip_state_controller.h"
+ #include "chrome/browser/ui/views/frame/browser_view.h"
+ #include "chrome/browser/ui/views/tabs/shared/new_tab_button.h"
+ #include "chrome/browser/ui/views/tabs/shared/tab_strip_flat_edge_button.h"
++#include "chrome/browser/ui/views/tabs/vertical/top_container_button.h"
+ #include "ui/actions/actions.h"
+ #include "ui/base/metadata/metadata_impl_macros.h"
++#include "ui/gfx/geometry/insets.h"
++#include "ui/gfx/geometry/size.h"
++#include "ui/views/actions/action_view_controller.h"
++#include "ui/views/controls/button/label_button.h"
++#include "ui/views/controls/highlight_path_generator.h"
++#include "ui/views/layout/flex_layout_types.h"
++#include "ui/views/layout/layout_types.h"
+ #include "ui/views/view_class_properties.h"
+ 
++namespace {
++// Sora: Zen footer buttons are standard toolbar buttons (sora/zen-spec.md,
++// section 5): 28x28, 16px icon, 8px squircle radius drawn as ~4px round, the
++// same shape as toolbar-shapes.patch.
++constexpr int kSoraFooterButtonSize = 28;
++constexpr int kSoraFooterIconSize = 16;
++constexpr int kSoraFooterButtonRadius = 4;
++}  // namespace
++
+ VerticalTabStripBottomContainer::VerticalTabStripBottomContainer(
+     tabs::VerticalTabStripStateController* state_controller,
+     actions::ActionItem* root_action_item,
+@@ -41,6 +59,38 @@ VerticalTabStripBottomContainer::VerticalTabStripBottomContainer(
+ 
+   new_tab_button_ = AddChildView(std::move(new_tab_button));
+ 
++  // Sora: Zen's footer row (library, workspaces, "+"). Sora has no workspaces
++  // yet, so it holds the downloads page at the leading edge and the collapse
++  // toggle (the strip's top button row is hidden while the toolbar sits in the
++  // sidebar) at the trailing edge. The buttons live in their own row because
++  // action updates reset a bound button's visibility.
++  sora_action_view_controller_ =
++      std::make_unique<views::ActionViewController>();
++  sora_footer_ = AddChildView(std::make_unique<views::FlexLayoutView>());
++  sora_footer_->SetOrientation(views::LayoutOrientation::kHorizontal);
++  sora_footer_->SetCrossAxisAlignment(views::LayoutAlignment::kCenter);
++  sora_footer_->SetProperty(
++      views::kFlexBehaviorKey,
++      views::FlexSpecification(views::LayoutOrientation::kHorizontal,
++                               views::MinimumFlexSizeRule::kScaleToZero,
++                               views::MaximumFlexSizeRule::kUnbounded));
++  sora_downloads_button_ = AddSoraFooterButton(kActionShowDownloadsPage);
++  sora_footer_->AddChildView(std::make_unique<views::View>())
++      ->SetProperty(
++          views::kFlexBehaviorKey,
++          views::FlexSpecification(views::MinimumFlexSizeRule::kScaleToZero,
++                                   views::MaximumFlexSizeRule::kUnbounded));
++  sora_collapse_button_ = AddSoraFooterButton(kActionToggleCollapseVertical);
++
++  sora_new_tab_action_ =
++      actions::ActionManager::Get().FindAction(kActionNewTab, root_action_item);
++  if (sora_new_tab_action_) {
++    sora_new_tab_action_subscription_ =
++        sora_new_tab_action_->AddActionChangedCallback(base::BindRepeating(
++            &VerticalTabStripBottomContainer::UpdateSoraFooterVisibility,
++            base::Unretained(this)));
++  }
++
+   OnCollapseStateChanged(state_controller->GetCollapseState());
+   collapsed_state_change_subscription_ =
+       state_controller->RegisterOnCollapseChanged(base::BindRepeating(
+@@ -57,6 +107,23 @@ bool VerticalTabStripBottomContainer::IsPositionInWindowCaption(
+     if (!child->GetVisible()) {
+       continue;
+     }
++    // Sora: only the footer's buttons count, so its empty middle still drags
++    // the window.
++    if (child == sora_footer_) {
++      for (views::View* footer_button :
++           {static_cast<views::View*>(sora_downloads_button_.get()),
++            static_cast<views::View*>(sora_collapse_button_.get())}) {
++        gfx::Point point_in_button = point;
++        if (footer_button && footer_button->GetVisible()) {
++          views::View::ConvertPointToTarget(this, footer_button,
++                                            &point_in_button);
++          if (footer_button->HitTestPoint(point_in_button)) {
++            return false;
++          }
++        }
++      }
++      continue;
++    }
+     gfx::Point point_in_child = point;
+     views::View::ConvertPointToTarget(this, child, &point_in_child);
+     if (child->HitTestPoint(point_in_child)) {
+@@ -105,6 +172,39 @@ void VerticalTabStripBottomContainer::UpdateButtonStyles(bool collapsed) {
+   new_tab_button_->SetInsets(GetLayoutInsets(
+       collapsed ? LayoutInset::VERTICAL_TAB_STRIP_BOTTOM_BUTTON_COLLAPSED
+                 : LayoutInset::VERTICAL_TAB_STRIP_BOTTOM_BUTTON_UNCOLLAPSED));
++
++  // Sora: expanded, the footer replaces the new tab button and sits at the
++  // bottom of the strip, as in Zen. Collapsed, Chromium's layout is kept.
++  sora_footer_mode_ = !collapsed;
++  if (sora_footer_mode_) {
++    SetCrossAxisAlignment(views::LayoutAlignment::kEnd);
++  }
++  UpdateSoraFooterVisibility();
++}
++
++views::LabelButton* VerticalTabStripBottomContainer::AddSoraFooterButton(
++    actions::ActionId action_id) {
++  actions::ActionItem* action_item =
++      actions::ActionManager::Get().FindAction(action_id, root_action_item_);
++  if (!action_item) {
++    return nullptr;
++  }
++  auto button = std::make_unique<TopContainerButton>();
++  button->SetIconSize(kSoraFooterIconSize);
++  button->SetPreferredSize(
++      gfx::Size(kSoraFooterButtonSize, kSoraFooterButtonSize));
++  views::InstallRoundRectHighlightPathGenerator(button.get(), gfx::Insets(),
++                                                kSoraFooterButtonRadius);
++  sora_action_view_controller_->CreateActionViewRelationship(
++      button.get(), action_item->GetAsWeakPtr());
++  return sora_footer_->AddChildView(std::move(button));
++}
++
++void VerticalTabStripBottomContainer::UpdateSoraFooterVisibility() {
++  sora_footer_->SetVisible(sora_footer_mode_);
++  new_tab_button_->SetVisible(
++      !sora_footer_mode_ &&
++      (!sora_new_tab_action_ || sora_new_tab_action_->GetVisible()));
+ }
+ 
+ BEGIN_METADATA(VerticalTabStripBottomContainer)
+diff --git a/chrome/browser/ui/views/tabs/vertical/vertical_tab_strip_bottom_container.h b/chrome/browser/ui/views/tabs/vertical/vertical_tab_strip_bottom_container.h
+index b3583ec..a2104b4 100644
+--- a/chrome/browser/ui/views/tabs/vertical/vertical_tab_strip_bottom_container.h
++++ b/chrome/browser/ui/views/tabs/vertical/vertical_tab_strip_bottom_container.h
+@@ -5,8 +5,11 @@
+ #ifndef CHROME_BROWSER_UI_VIEWS_TABS_VERTICAL_VERTICAL_TAB_STRIP_BOTTOM_CONTAINER_H_
+ #define CHROME_BROWSER_UI_VIEWS_TABS_VERTICAL_VERTICAL_TAB_STRIP_BOTTOM_CONTAINER_H_
+ 
++#include <memory>
++
+ #include "base/callback_list.h"
+ #include "base/memory/raw_ptr.h"
++#include "ui/actions/action_id.h"
+ #include "ui/base/metadata/metadata_header_macros.h"
+ #include "ui/views/layout/flex_layout_view.h"
+ 
+@@ -18,6 +21,11 @@ namespace actions {
+ class ActionItem;
+ }  // namespace actions
+ 
++namespace views {
++class ActionViewController;
++class LabelButton;
++}  // namespace views
++
+ namespace tabs {
+ class VerticalTabStripStateController;
+ enum class VerticalTabStripCollapseState;
+@@ -38,12 +46,22 @@ class VerticalTabStripBottomContainer : public views::FlexLayoutView {
+ 
+   void OnCollapseStateChanged(tabs::VerticalTabStripCollapseState state);
+ 
++  // Sora: the footer's collapse toggle, or nullptr.
++  views::LabelButton* GetSoraCollapseButton() { return sora_collapse_button_; }
++
+  private:
+   void OnNewTabButtonContextMenuWillShow();
+   void OnNewTabButtonContextMenuClosed();
+ 
+   void UpdateButtonStyles(bool collapsed);
+ 
++  // Sora: adds a footer button bound to `action_id`, or returns nullptr if the
++  // browser has no such action.
++  views::LabelButton* AddSoraFooterButton(actions::ActionId action_id);
++  // Sora: shows either the footer or the new tab button. Also re-run after
++  // the new tab action changes, since that resets the button's visibility.
++  void UpdateSoraFooterVisibility();
++
+   raw_ptr<BrowserWindowInterface> browser_ = nullptr;
+   raw_ptr<actions::ActionItem> root_action_item_ = nullptr;
+   raw_ptr<TabStripFlatEdgeButton> new_tab_button_ = nullptr;
+@@ -51,6 +69,16 @@ class VerticalTabStripBottomContainer : public views::FlexLayoutView {
+   base::CallbackListSubscription new_tab_button_pressed_subscription_;
+ 
+   std::unique_ptr<ExpandOnHoverLock> expand_on_hover_lock_;
++
++  // Sora: Zen's sidebar footer, shown instead of the new tab button while the
++  // strip is expanded (the new tab button moves to the top of the tab list).
++  bool sora_footer_mode_ = false;
++  std::unique_ptr<views::ActionViewController> sora_action_view_controller_;
++  raw_ptr<views::FlexLayoutView> sora_footer_ = nullptr;
++  raw_ptr<views::LabelButton> sora_downloads_button_ = nullptr;
++  raw_ptr<views::LabelButton> sora_collapse_button_ = nullptr;
++  raw_ptr<actions::ActionItem> sora_new_tab_action_ = nullptr;
++  base::CallbackListSubscription sora_new_tab_action_subscription_;
+ };
+ 
+ #endif  // CHROME_BROWSER_UI_VIEWS_TABS_VERTICAL_VERTICAL_TAB_STRIP_BOTTOM_CONTAINER_H_

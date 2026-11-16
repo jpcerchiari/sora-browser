@@ -1,0 +1,199 @@
+diff --git a/chrome/browser/ui/views/location_bar/location_bar_view.cc b/chrome/browser/ui/views/location_bar/location_bar_view.cc
+index f620235..03d0cc1 100644
+--- a/chrome/browser/ui/views/location_bar/location_bar_view.cc
++++ b/chrome/browser/ui/views/location_bar/location_bar_view.cc
+@@ -2225,6 +2225,8 @@ void LocationBarView::OnTouchUiChanged() {
+       CONTEXT_OMNIBOX_PRIMARY, views::style::STYLE_PRIMARY);
+   location_icon_view_->SetFontList(font_list);
+   omnibox_view_->SetFontList(font_list);
++  // Sora: SetFontList() resets the omnibox's idle text weight.
++  omnibox_view_->SoraUpdateTextWeight();
+   ime_inline_autocomplete_view_->SetFontList(font_list);
+   omnibox_additional_text_view_->SetFontList(font_list);
+   selected_keyword_view_->SetFontList(font_list);
+diff --git a/chrome/browser/ui/views/omnibox/omnibox_view_views.cc b/chrome/browser/ui/views/omnibox/omnibox_view_views.cc
+index 5fe6c35..99ac598 100644
+--- a/chrome/browser/ui/views/omnibox/omnibox_view_views.cc
++++ b/chrome/browser/ui/views/omnibox/omnibox_view_views.cc
+@@ -126,9 +126,11 @@
+ #include "ui/display/screen.h"
+ #include "ui/events/event.h"
+ #include "ui/gfx/canvas.h"
++#include "ui/gfx/font.h"
+ #include "ui/gfx/font_list.h"
+ #include "ui/gfx/geometry/insets.h"
+ #include "ui/gfx/image/image.h"
++#include "ui/gfx/render_text.h"
+ #include "ui/gfx/selection_model.h"
+ #include "ui/gfx/text_utils.h"
+ #include "ui/menus/simple_menu_model.h"
+@@ -158,6 +160,9 @@ namespace {
+ using ::metrics::OmniboxEventProto;
+ using ::ui::mojom::DragOperation;
+ 
++// Sora: Zen's idle URL text weight (--zen-font-weight-medium).
++constexpr gfx::Font::Weight kSoraIdleTextWeight = gfx::Font::Weight::MEDIUM;
++
+ // This function provides a logging implementation that aligns with the original
+ // definition of the `DEPRECATED_UMA_HISTOGRAM_MEDIUM_TIMES()` macro, which is
+ // currently being used to log the `FocusToOpenTimeAnyPopupState3` Omnibox
+@@ -304,6 +309,9 @@ void OmniboxViewViews::Init() {
+   constexpr gfx::Insets kTextfieldInsets(0);
+   SetBorder(views::CreateEmptyBorder(kTextfieldInsets));
+ 
++  // Sora: the omnibox starts unfocused, so start at the idle weight.
++  SoraUpdateTextWeight();
++
+ #if BUILDFLAG(IS_CHROMEOS)
+   ash::input_method::InputMethodManager::Get()->AddCandidateWindowObserver(
+       this);
+@@ -1404,6 +1412,14 @@ int OmniboxViewViews::GetWidth() const {
+   return location_bar_view_ ? location_bar_view_->width() : 0;
+ }
+ 
++void OmniboxViewViews::SoraUpdateTextWeight() {
++  // Sora: RenderText keeps this weight across SetText() calls; only
++  // SetFontList() resets it to the font's own weight.
++  // Zen uses the same medium weight with and without focus.
++  GetRenderText()->SetWeight(kSoraIdleTextWeight);
++  SchedulePaint();
++}
++
+ bool OmniboxViewViews::IsImeShowingPopup() const {
+ #if BUILDFLAG(IS_CHROMEOS)
+   return ime_candidate_window_open_;
+@@ -1888,6 +1904,17 @@ void OmniboxViewViews::OnFocus() {
+     UpdateAccessibleTextSelection();
+   }
+ 
++  // Sora: the unfocused omnibox shows only the host (see
++  // LocationBarModelDelegate::ShouldTrimDisplayUrlAfterHostName()), so bring
++  // the full URL back on every focus, mouse clicks included, not only on
++  // keyboard focus or after the first caret move. Unelide() is a no-op while
++  // the user has a draft or when the full URL is already shown, and it
++  // selects all, as a click on the unfocused omnibox would.
++  if (!IsFullWebUIOmnibox() && controller()->edit_model()->Unelide()) {
++    TextChanged();
++  }
++  SoraUpdateTextWeight();
++
+   GetRenderText()->SetElideBehavior(gfx::NO_ELIDE);
+ 
+ #if BUILDFLAG(SUPPORTS_AX_TEXT_OFFSETS)
+@@ -1913,6 +1940,8 @@ void OmniboxViewViews::OnFocus() {
+ void OmniboxViewViews::OnBlur() {
+   views::Textfield::OnBlur();
+   is_user_initiated_focus_ = false;
++  // Sora: back to the idle weight.
++  SoraUpdateTextWeight();
+ 
+   views::FocusManager* focus_manager = GetFocusManager();
+   const bool focus_moved_to_another_view =
+diff --git a/chrome/browser/ui/views/omnibox/omnibox_view_views.h b/chrome/browser/ui/views/omnibox/omnibox_view_views.h
+index 4de4127..34475d5 100644
+--- a/chrome/browser/ui/views/omnibox/omnibox_view_views.h
++++ b/chrome/browser/ui/views/omnibox/omnibox_view_views.h
+@@ -157,6 +157,11 @@ class OmniboxViewViews
+   // Returns the omnibox's width in pixels.
+   int GetWidth() const;
+ 
++  // Sora: draws the text at Zen's idle weight (500) while the omnibox is
++  // unfocused and at the font's own weight while it has focus. Call it again
++  // after SetFontList(), which resets the weight.
++  void SoraUpdateTextWeight();
++
+   // OmniboxView:
+   void EmphasizeURLComponents() override;
+   void Update() override;
+diff --git a/chrome/browser/ui/views/page_action/page_action_view.cc b/chrome/browser/ui/views/page_action/page_action_view.cc
+index 6038ec2..beab1ad 100644
+--- a/chrome/browser/ui/views/page_action/page_action_view.cc
++++ b/chrome/browser/ui/views/page_action/page_action_view.cc
+@@ -5,10 +5,12 @@
+ #include "chrome/browser/ui/views/page_action/page_action_view.h"
+ 
+ #include <algorithm>
++#include <array>
+ #include <utility>
+ 
+ #include "base/callback_list.h"
+ #include "base/check.h"
++#include "base/containers/contains.h"
+ #include "base/functional/bind.h"
+ #include "base/memory/ptr_util.h"
+ #include "base/metrics/histogram_functions.h"
+@@ -57,6 +59,25 @@ IconLabelBubbleView::AnimationStyle GetViewsAnimationStyle(
+   }
+ }
+ 
++// Sora: location bar icons that Zen hides (sora/zen-spec.md, section 4):
++// bookmark star, reading mode, zoom and the tracking protection (third-party
++// cookies) icon. The views stay in the container and their actions keep
++// working (Ctrl+D, zoom shortcuts); bubbles that would anchor to them anchor
++// to the location bar instead, as ToolbarView::GetBubbleAnchor() already does.
++constexpr auto kSoraHiddenPageActions = std::to_array<actions::ActionId>({
++    kActionBookmarkThisTab,
++    kActionSidePanelShowReadAnything,
++    kActionShowZoomBubble,
++    kActionShowCookieControls,
++});
++
++// Sora: the model's visibility, minus the icons above.
++bool IsSoraVisible(const PageActionModelInterface& model,
++                   actions::ActionId action_id) {
++  return model.GetVisible() &&
++         !base::Contains(kSoraHiddenPageActions, action_id);
++}
++
+ }  // namespace
+ 
+ PageActionView::PageActionView(actions::ActionItem* action_item,
+@@ -198,7 +219,9 @@ void PageActionView::OnNewActiveController(PageActionController* controller) {
+ 
+ void PageActionView::OnPageActionModelChanged(
+     const PageActionModelInterface& model) {
+-  const bool visible = model.GetVisible();
++  // Sora: hidden icons count as not declared visible, so the container
++  // lays out and draws its capsule as if they were absent.
++  const bool visible = IsSoraVisible(model, GetActionId());
+   const bool declared_changed = (declared_visible_ != visible);
+   declared_visible_ = visible;
+   SetEnabled(visible);
+@@ -234,7 +257,8 @@ void PageActionView::OnPageActionModelChanged(
+ 
+ void PageActionView::UpdateAnimationState(
+     const PageActionModelInterface& model) {
+-  const bool visible = model.GetVisible();
++  // Sora: see IsSoraVisible().
++  const bool visible = IsSoraVisible(model, GetActionId());
+ 
+   // Configure views style and trailing icon first.
+   const auto views_style = GetViewsAnimationStyle(model.GetAnimationStyle());
+@@ -560,7 +584,9 @@ void PageActionView::NotifyIsChipShowingChange() {
+ 
+ void PageActionView::UpdateAnchoredMessage(
+     const PageActionModelInterface& model) {
+-  if (model.GetVisible() && model.ShouldShowAnchoredMessage()) {
++  // Sora: see IsSoraVisible().
++  if (IsSoraVisible(model, GetActionId()) &&
++      model.ShouldShowAnchoredMessage()) {
+     CreateAndShowAnchoredMessage(model);
+   } else if (IsAnchoredMessageVisible()) {
+     anchored_message_->AnimateOut();
+diff --git a/components/omnibox/browser/location_bar_model_delegate.cc b/components/omnibox/browser/location_bar_model_delegate.cc
+index ec0eddc..86dd7dc 100644
+--- a/components/omnibox/browser/location_bar_model_delegate.cc
++++ b/components/omnibox/browser/location_bar_model_delegate.cc
+@@ -9,7 +9,11 @@ bool LocationBarModelDelegate::ShouldPreventElision() {
+ }
+ 
+ bool LocationBarModelDelegate::ShouldTrimDisplayUrlAfterHostName() const {
+-  return false;
++  // Sora: like Zen's zen.urlbar.show-domain-only-in-sidebar, the unfocused
++  // location bar shows only the host. This only changes GetURLForDisplay();
++  // the omnibox shows GetFormattedFullURL() again on focus, and the "Always
++  // show full URLs" context menu item (ShouldPreventElision) still wins.
++  return true;
+ }
+ 
+ bool LocationBarModelDelegate::ShouldDisplayURL() const {

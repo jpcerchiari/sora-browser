@@ -1,0 +1,136 @@
+diff --git a/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc b/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc
+index 7764d4a..108e204 100644
+--- a/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc
++++ b/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc
+@@ -192,6 +192,9 @@ struct BrowserViewTabbedLayoutImpl::SeparatorInfo {
+   bool adjust_for_missing_separator = false;
+   // Whether to pad the top of the side panel.
+   bool side_panel_top_padding = false;
++  // Sora: the web contents float as a rounded, shadowed card with a margin
++  // that shows the frame, as in Zen. Implies `shadow_box`.
++  bool sora_floating_contents = false;
+ };
+ 
+ // Describes how to transform the side panel animation content during
+@@ -284,6 +287,12 @@ BrowserViewTabbedLayoutImpl::CalculateSeparatorInfo() const {
+   switch (layout_data_->window_state) {
+     case WindowState::kNormal:
+     case WindowState::kMaximized: {
++      if (layout_data_->tab_strip_type == TabStripType::kVertical) {
++        info.sora_floating_contents = true;
++        info.shadow_box = true;
++        info.side_panel_top_padding = true;
++        break;
++      }
+       // In content-height mode, split view outline serves as shadow box.
+       info.shadow_box =
+           has_side_panel && (has_infobar || !is_split_view || !is_force_to_top);
+@@ -996,6 +1005,7 @@ BrowserViewTabbedLayoutImpl::CalculateProposedLayout(
+     const double top_corner = layout_data_->vertical_tabs_top_corner();
+     const bool top_corner_visible =
+         layout_data_->tab_strip_type == TabStripType::kVertical &&
++        !layout_data_->separator_info.sora_floating_contents &&
+         top_corner > 0.0;
+ 
+     // The top corner is drawn when the tabstrip goes all the way to the top.
+@@ -1019,6 +1029,7 @@ BrowserViewTabbedLayoutImpl::CalculateProposedLayout(
+     const double bottom_corner = layout_data_->vertical_tabs_bottom_corner();
+     const bool bottom_corner_visible =
+         layout_data_->tab_strip_type == TabStripType::kVertical &&
++        !layout_data_->separator_info.sora_floating_contents &&
+         bottom_corner > 0.0;
+     if (bottom_corner_visible) {
+       auto preferred =
+@@ -1147,7 +1158,16 @@ BrowserViewTabbedLayoutImpl::CalculateProposedLayout(
+   }
+ 
+   gfx::Insets shadow_overlay_insets;
+-  if (layout_data_->separator_info.shadow_box) {
++  if (layout_data_->separator_info.sora_floating_contents) {
++    // The vertical tab strip already pads its own trailing edge, so the card
++    // only needs a margin on the other three sides.
++    const int margin = MultiContentsView::kSplitViewContentInset;
++    shadow_overlay_insets = gfx::Insets::TLBR(margin, 0, margin, margin);
++    params.Inset(shadow_overlay_insets);
++    if (!side_panel_is_animating) {
++      unclipped_contents_region.Inset(shadow_overlay_insets);
++    }
++  } else if (layout_data_->separator_info.shadow_box) {
+     // As the side panel animates in, the main panel shrinks and moves over to
+     // accommodate the panel.
+     const int scaled_main_area_padding = base::ClampRound(
+@@ -1705,8 +1725,11 @@ void BrowserViewTabbedLayoutImpl::DoPostLayoutVisualAdjustments(
+                                           vertical_tabs_bottom_corner_amount) *
+             frame_color.opacity,
+     };
+-    // Vertical tab strip always draws trailing edge.
+-    vertical_tabs_outline.trailing = true;
++    // Vertical tab strip always draws trailing edge, except when the contents
++    // float as a card and the strip only needs it while flying over them.
++    vertical_tabs_outline.trailing =
++        !layout_data_->separator_info.sora_floating_contents ||
++        animation.expand_on_hover_width > 0.0;
+     // Top edge is drawn when the tabstrip is not flush with the edge of the
+     // screen, or with a visual element that provides a natural border.
+     if (animation.expand_on_hover_width > 0.0 || top_corner < 0.0 ||
+diff --git a/chrome/browser/ui/views/frame/multi_contents_view.h b/chrome/browser/ui/views/frame/multi_contents_view.h
+index e39f000..1ed2038 100644
+--- a/chrome/browser/ui/views/frame/multi_contents_view.h
++++ b/chrome/browser/ui/views/frame/multi_contents_view.h
+@@ -65,7 +65,8 @@ class MultiContentsView
+   };
+ 
+   static constexpr int kSplitViewContentInset = 8;
+-  static constexpr float kSplitViewContentCornerRadius = 6;
++  // Sora: 5px, the Zen content card radius on Windows.
++  static constexpr float kSplitViewContentCornerRadius = 5;
+   static constexpr gfx::RoundedCornersF kSplitViewContentRoundedCorners{
+       kSplitViewContentCornerRadius};
+ 
+diff --git a/chrome/browser/ui/views/frame/shadow_overlay_view.cc b/chrome/browser/ui/views/frame/shadow_overlay_view.cc
+index 93d0cf6..2a23cc3 100644
+--- a/chrome/browser/ui/views/frame/shadow_overlay_view.cc
++++ b/chrome/browser/ui/views/frame/shadow_overlay_view.cc
+@@ -10,8 +10,10 @@
+ #include "base/i18n/rtl.h"
+ #include "chrome/browser/ui/animation/browser_animation_controller.h"
+ #include "chrome/browser/ui/animation/browser_animation_types.h"
++#include "chrome/browser/ui/tabs/vertical_tab_strip_state_controller.h"
+ #include "chrome/browser/ui/views/animations/side_panel_animations.h"
+ #include "chrome/browser/ui/views/frame/browser_view.h"
++#include "chrome/browser/ui/views/frame/multi_contents_view.h"
+ #include "chrome/browser/ui/views/frame/shadow_frame_view.h"
+ #include "chrome/browser/ui/views/frame/themed_background.h"
+ #include "chrome/browser/ui/views/side_panel/side_panel.h"
+@@ -211,14 +213,15 @@ void ShadowOverlayView::VisibilityChanged(View* starting_from, bool visible) {
+ }
+ 
+ void ShadowOverlayView::AddedToWidget() {
++  // Sora: same radius as the split view cards, so every content card matches.
+   shadow_box_->SetShadowCornerRadius(
+-      GetLayoutProvider()->GetCornerRadiusMetric(views::Emphasis::kHigh));
++      MultiContentsView::kSplitViewContentCornerRadius);
+ }
+ 
+ views::ProposedLayout ShadowOverlayView::CalculateProposedLayout(
+     const views::SizeBounds& size_bounds) const {
+   const int corner_radius =
+-      GetLayoutProvider()->GetCornerRadiusMetric(views::Emphasis::kHigh);
++      static_cast<int>(MultiContentsView::kSplitViewContentCornerRadius);
+ 
+   views::ProposedLayout layout;
+   layout.host_size = gfx::Size(size_bounds.width().value_or(corner_radius),
+@@ -267,6 +270,13 @@ views::ProposedLayout ShadowOverlayView::CalculateProposedLayout(
+ }
+ 
+ double ShadowOverlayView::GetShadowValue() const {
++  // Sora: with vertical tabs the contents are always a floating card, so the
++  // shadow stays on instead of following the side panel.
++  if (const auto* vertical_tabs =
++          tabs::VerticalTabStripStateController::From(browser_view_->browser());
++      vertical_tabs && vertical_tabs->ShouldDisplayVerticalTabs()) {
++    return 1.0;
++  }
+   // Get the current animation value (if any).
+   const auto animation_value =
+       BrowserAnimationController::From(browser_view_->browser())

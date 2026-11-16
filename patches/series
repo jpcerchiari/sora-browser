@@ -24,3 +24,27 @@ ungoogled-chromium/windows/windows-fix-unsupported-llvm-flags.patch
 ungoogled-chromium/windows/windows-fix-building-without-crubit.patch
 ungoogled-chromium/windows/windows-fix-python.patch
 ungoogled-chromium/windows/windows-fix-typescript-lib-dom.patch
+
+# Sora Browser
+sora/branding.patch
+sora/vertical-tabs-by-default.patch
+sora/color-mixer.patch
+sora/floating-contents.patch
+sora/vertical-tab-metrics.patch
+sora/sidebar-toolbar.patch
+sora/toolbar-shapes.patch
+sora/vertical-tab-style.patch
+sora/omnibox-idle.patch
+sora/sidebar-rows.patch
+sora/glance.patch
+sora/compact-mode.patch
+sora/essentials.patch
+sora/floating-urlbar.patch
+sora/omnibox-results.patch
+sora/workspaces.patch
+sora/window-controls.patch
+sora/frame-polish.patch
+sora/tabs-polish.patch
+sora/split-view.patch
+sora/workspaces-polish.patch
+sora/glance-polish.patch

@@ -1,0 +1,69 @@
+diff --git a/chrome/browser/ui/layout_constants.cc b/chrome/browser/ui/layout_constants.cc
+index b8206dc..bfde285 100644
+--- a/chrome/browser/ui/layout_constants.cc
++++ b/chrome/browser/ui/layout_constants.cc
+@@ -157,18 +157,21 @@ int GetLayoutConstant(LayoutConstant constant) {
+       return 20;
+     case LayoutConstant::kMainBackgroundRegionCornerRadius:
+     case LayoutConstant::kToolbarCornerRadius:
+-    case LayoutConstant::kVerticalTabCornerRadius:
+       return 8;
++    // Sora: Zen tab metrics (14px squircle radius ~ 6px round, 36px rows).
++    case LayoutConstant::kVerticalTabCornerRadius:
++      return 6;
+     case LayoutConstant::kVerticalTabHeight:
+-      return 30;
++      return 36;
+     case LayoutConstant::kVerticalTabPinnedHeight:
+-      return 32;
++      return 36;
+     case LayoutConstant::kVerticalTabMinWidth:
+       return 32;
++    // Sora: Zen sidebar padding (5px) plus the tab's own 2px margin.
+     case LayoutConstant::kVerticalTabStripHorizontalPadding:
+-      return 12;
++      return 7;
+     case LayoutConstant::kVerticalTabStripUncollapsedVerticalPadding:
+-      return 12;
++      return 5;
+     case LayoutConstant::kVerticalTabStripCollapsedVerticalPadding:
+       return 8;
+     case LayoutConstant::kVerticalTabStripComboButtonIconSize:
+diff --git a/chrome/browser/ui/tabs/vertical_tab_strip_state.h b/chrome/browser/ui/tabs/vertical_tab_strip_state.h
+index 62ea6d7..ddf3897 100644
+--- a/chrome/browser/ui/tabs/vertical_tab_strip_state.h
++++ b/chrome/browser/ui/tabs/vertical_tab_strip_state.h
+@@ -7,14 +7,15 @@
+ 
+ namespace tabs {
+ 
+-inline constexpr int kVerticalTabStripDefaultUncollapsedWidth = 240;
++// Sora: Zen sidebar widths (default 186, min 152, max 500, collapsed 60).
++inline constexpr int kVerticalTabStripDefaultUncollapsedWidth = 186;
+ // TODO(crbug.com/465833741): Replace constant with derived value based on
+ // caption buttons.
+-inline constexpr int kVerticalTabStripUncollapsedMinWidth = 126;
++inline constexpr int kVerticalTabStripUncollapsedMinWidth = 152;
+ // TODO(crbug.com/465832180): Replace constant based width final max width for
+ // view.
+-inline constexpr int kVerticalTabStripUncollapsedMaxWidth = 400;
+-inline constexpr int kVerticalTabStripCollapsedWidth = 56;
++inline constexpr int kVerticalTabStripUncollapsedMaxWidth = 500;
++inline constexpr int kVerticalTabStripCollapsedWidth = 60;
+ // TODO(crbug.com/465833741): Determine snapping behavior.
+ inline constexpr int kVerticalTabStripCollapseSnapWidth =
+     (kVerticalTabStripUncollapsedMinWidth + kVerticalTabStripCollapsedWidth) /
+diff --git a/chrome/browser/ui/views/tabs/common/unpinned_tab_container_view_layout.cc b/chrome/browser/ui/views/tabs/common/unpinned_tab_container_view_layout.cc
+index 366f3e3..b306ece 100644
+--- a/chrome/browser/ui/views/tabs/common/unpinned_tab_container_view_layout.cc
++++ b/chrome/browser/ui/views/tabs/common/unpinned_tab_container_view_layout.cc
+@@ -25,7 +25,8 @@
+ #include "ui/views/view_utils.h"
+ 
+ namespace {
+-constexpr int kTabVerticalPadding = 2;
++// Sora: Zen tabs have a 2px margin above and below, so 4px between rows.
++constexpr int kTabVerticalPadding = 4;
+ }  // namespace
+ 
+ UnpinnedTabContainerViewLayout::UnpinnedTabContainerViewLayout(

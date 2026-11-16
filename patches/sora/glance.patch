@@ -1,0 +1,859 @@
+diff --git a/chrome/browser/ui/browser_web_contents_delegate/BUILD.gn b/chrome/browser/ui/browser_web_contents_delegate/BUILD.gn
+index 7dbf9fb..cdfa727 100644
+--- a/chrome/browser/ui/browser_web_contents_delegate/BUILD.gn
++++ b/chrome/browser/ui/browser_web_contents_delegate/BUILD.gn
+@@ -37,6 +37,8 @@ if (!is_android) {
+       "//chrome/browser/ui/views:status_bubble",
+       "//chrome/browser/ui/views/frame:browser_view_header",
+       "//chrome/browser/ui/views/frame:contents_web_view",
++      # Sora: Glance.
++      "//chrome/browser/ui/views/glance",
+       "//chrome/browser/ui/web_applications",
+       "//components/find_in_page",
+       "//components/headless/console_message_logger",
+diff --git a/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc b/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc
+index 2e02cc4..01efaad 100644
+--- a/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc
++++ b/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc
+@@ -52,6 +52,7 @@
+ #include "chrome/browser/ui/unload_controller.h"
+ #include "chrome/browser/ui/views/frame/browser_view.h"
+ #include "chrome/browser/ui/views/frame/contents_web_view.h"
++#include "chrome/browser/ui/views/glance/glance_controller.h"
+ #include "chrome/browser/ui/views/status_bubble_views.h"
+ #include "chrome/browser/ui/web_applications/app_browser_controller.h"
+ #include "chrome/browser/web_applications/web_app_provider.h"
+@@ -788,6 +789,14 @@ void BrowserWebContentsDelegate::SetContentsBounds(content::WebContents* source,
+ 
+ void BrowserWebContentsDelegate::UpdateTargetURL(content::WebContents* source,
+                                                  const GURL& url) {
++  // Sora: Glance opens the link under the mouse.
++  if (!glance_controller_ && GlanceController::IsSupported(*browser_)) {
++    glance_controller_ = std::make_unique<GlanceController>(*browser_);
++  }
++  if (glance_controller_) {
++    glance_controller_->OnTargetURLChanged(source, url);
++  }
++
+   std::vector<StatusBubble*> status_bubbles =
+       browser_ui_controller_->GetStatusBubbles();
+   for (StatusBubble* status_bubble : status_bubbles) {
+@@ -802,6 +811,13 @@ void BrowserWebContentsDelegate::UpdateTargetURL(content::WebContents* source,
+   }
+ }
+ 
++// Sora: alt + click on a link opens it in Glance.
++bool BrowserWebContentsDelegate::PreHandleMouseEvent(
++    content::WebContents* source,
++    const blink::WebMouseEvent& event) {
++  return glance_controller_ && glance_controller_->OnMouseEvent(source, event);
++}
++
+ void BrowserWebContentsDelegate::ContentsMouseEvent(
+     content::WebContents* source,
+     const ui::Event& event) {
+diff --git a/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.h b/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.h
+index 040961e..83769cf 100644
+--- a/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.h
++++ b/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.h
+@@ -5,6 +5,8 @@
+ #ifndef CHROME_BROWSER_UI_BROWSER_WEB_CONTENTS_DELEGATE_BROWSER_WEB_CONTENTS_DELEGATE_H_
+ #define CHROME_BROWSER_UI_BROWSER_WEB_CONTENTS_DELEGATE_BROWSER_WEB_CONTENTS_DELEGATE_H_
+ 
++#include <memory>
++
+ #include "base/memory/raw_ref.h"
+ #include "base/timer/elapsed_timer.h"
+ #include "content/public/browser/file_select_listener.h"
+@@ -16,6 +18,7 @@ class BrowserWindow;
+ class BrowserWindowInterface;
+ class DesktopBrowserWindowCapabilities;
+ class ExclusiveAccessManager;
++class GlanceController;
+ class UnloadController;
+ 
+ namespace chrome {
+@@ -132,6 +135,9 @@ class BrowserWebContentsDelegate : public content::WebContentsDelegate {
+   void SetContentsBounds(content::WebContents* source,
+                          const gfx::Rect& bounds) override;
+   void UpdateTargetURL(content::WebContents* source, const GURL& url) override;
++  // Sora: alt + click on a link opens it in Glance.
++  bool PreHandleMouseEvent(content::WebContents* source,
++                           const blink::WebMouseEvent& event) override;
+   void ContentsMouseEvent(content::WebContents* source,
+                           const ui::Event& event) override;
+   void ContentsZoomChange(bool zoom_in) override;
+@@ -269,6 +275,8 @@ class BrowserWebContentsDelegate : public content::WebContentsDelegate {
+   const raw_ref<DesktopBrowserWindowCapabilities> capabilities_;
+   const raw_ref<BrowserUiController> browser_ui_controller_;
+   const raw_ref<BrowserWindowInterface> browser_;
++  // Sora: Glance, created on the first hovered link of a normal window.
++  std::unique_ptr<GlanceController> glance_controller_;
+   ui::ScopedUnownedUserData<BrowserWebContentsDelegate> scoped_data_holder_;
+ };
+ 
+diff --git a/chrome/browser/ui/views/glance/BUILD.gn b/chrome/browser/ui/views/glance/BUILD.gn
+new file mode 100644
+index 0000000..250eb10
+--- /dev/null
++++ b/chrome/browser/ui/views/glance/BUILD.gn
+@@ -0,0 +1,45 @@
++# Copyright 2026 The Sora Browser Authors
++# Use of this source code is governed by a BSD-style license that can be
++# found in the LICENSE file.
++
++assert(!is_android)
++
++# Sora: Glance, Zen's link preview (sora/zen-spec.md, section 10).
++source_set("glance") {
++  sources = [
++    "glance_controller.cc",
++    "glance_controller.h",
++  ]
++  public_deps = [
++    "//base",
++    "//chrome/browser/ui/tabs:tab_strip_model_observer",
++    "//content/public/browser",
++    "//ui/gfx/geometry",
++    "//ui/views",
++    "//url",
++  ]
++  deps = [
++    "//cc/paint",
++    "//chrome/app:generated_resources",
++    "//chrome/app/vector_icons",
++    "//chrome/browser/ui:browser_tabstrip",
++    "//chrome/browser/ui/browser_window",
++    "//chrome/browser/ui/navigator",
++    "//chrome/browser/ui/tabs:tab_strip",
++    "//chrome/browser/ui/views:theme_copying_widget",
++    "//chrome/browser/ui/views/frame:browser_view_header",
++    "//chrome/browser/ui/views/frame:contents_container_view",
++    "//components/input",
++    "//skia",
++    "//third_party/blink/public/common:headers",
++    "//third_party/blink/public/mojom:mojom_platform",
++    "//ui/base",
++    "//ui/base/metadata",
++    "//ui/color",
++    "//ui/compositor",
++    "//ui/events",
++    "//ui/gfx",
++    "//ui/strings",
++    "//ui/views/controls/webview",
++  ]
++}
+diff --git a/chrome/browser/ui/views/glance/glance_controller.cc b/chrome/browser/ui/views/glance/glance_controller.cc
+new file mode 100644
+index 0000000..b5e1d00
+--- /dev/null
++++ b/chrome/browser/ui/views/glance/glance_controller.cc
+@@ -0,0 +1,560 @@
++// Copyright 2026 The Sora Browser Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/ui/views/glance/glance_controller.h"
++
++#include <algorithm>
++#include <cmath>
++#include <string>
++#include <utility>
++#include <vector>
++
++#include "base/functional/bind.h"
++#include "base/location.h"
++#include "base/numerics/safe_conversions.h"
++#include "base/strings/string_util.h"
++#include "base/task/sequenced_task_runner.h"
++#include "base/time/time.h"
++#include "cc/paint/paint_flags.h"
++#include "chrome/app/vector_icons/vector_icons.h"
++#include "chrome/browser/ui/browser_tabstrip.h"
++#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
++#include "chrome/browser/ui/navigator/browser_navigator_params.h"
++#include "chrome/browser/ui/tabs/tab_strip_model.h"
++#include "chrome/browser/ui/views/frame/browser_view.h"
++#include "chrome/browser/ui/views/frame/contents_container_view.h"
++#include "chrome/browser/ui/views/theme_copying_widget.h"
++#include "chrome/grit/generated_resources.h"
++#include "components/input/native_web_keyboard_event.h"
++#include "content/public/browser/navigation_controller.h"
++#include "content/public/browser/navigation_handle.h"
++#include "content/public/browser/page_navigator.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/common/referrer.h"
++#include "third_party/blink/public/common/input/web_input_event.h"
++#include "third_party/blink/public/common/input/web_mouse_event.h"
++#include "third_party/blink/public/mojom/window_features/window_features.mojom.h"
++#include "third_party/skia/include/core/SkColor.h"
++#include "ui/base/l10n/l10n_util.h"
++#include "ui/base/metadata/metadata_header_macros.h"
++#include "ui/base/metadata/metadata_impl_macros.h"
++#include "ui/base/models/image_model.h"
++#include "ui/base/page_transition_types.h"
++#include "ui/base/window_open_disposition.h"
++#include "ui/color/color_id.h"
++#include "ui/color/color_provider.h"
++#include "ui/compositor/layer.h"
++#include "ui/compositor/scoped_layer_animation_settings.h"
++#include "ui/events/event.h"
++#include "ui/events/keycodes/keyboard_codes.h"
++#include "ui/gfx/animation/animation.h"
++#include "ui/gfx/animation/tween.h"
++#include "ui/gfx/canvas.h"
++#include "ui/gfx/color_utils.h"
++#include "ui/gfx/geometry/rect.h"
++#include "ui/gfx/geometry/rect_f.h"
++#include "ui/gfx/geometry/rounded_corners_f.h"
++#include "ui/gfx/geometry/vector2d.h"
++#include "ui/gfx/geometry/vector2d_f.h"
++#include "ui/gfx/shadow_value.h"
++#include "ui/gfx/skia_paint_util.h"
++#include "ui/strings/grit/ui_strings.h"
++#include "ui/views/controls/button/image_button.h"
++#include "ui/views/controls/highlight_path_generator.h"
++#include "ui/views/controls/native/native_view_host.h"
++#include "ui/views/controls/webview/webview.h"
++
++namespace {
++
++// Values from sora/zen-spec.md, section 10.
++// The card takes 80% of the tab's width and all of its height.
++constexpr float kCardWidthFraction = 0.8f;
++// Same radius as the page card (MultiContentsView with floating-contents).
++constexpr float kCardRadius = 5.0f;
++// --zen-big-shadow: rgba(0, 0, 0, 0.24) 0 3px 8px.
++constexpr gfx::Vector2d kCardShadowOffset(0, 3);
++constexpr double kCardShadowBlur = 8;
++constexpr SkAlpha kCardShadowAlpha = 0x3D;
++// The tab behind fades to opacity 0.3 over the window background, which is
++// the frame color drawn at 70% on top of it.
++constexpr SkAlpha kBackdropAlpha = 0xB3;
++// Buttons: 34px circles with an 8px padding, in a column 15px from the top,
++// with 12px of padding and 12px between them.
++constexpr int kButtonSize = 34;
++constexpr int kButtonPadding = 8;
++constexpr int kButtonsTop = 15;
++constexpr int kButtonsSpacing = 12;
++// A click that moved more than this is a text selection, not a Glance.
++constexpr float kDragThreshold = 4.0f;
++// zen.glance.animation-duration.
++constexpr base::TimeDelta kOpenDuration = base::Milliseconds(350);
++
++constexpr int kModifierMask =
++    blink::WebInputEvent::kShiftKey | blink::WebInputEvent::kControlKey |
++    blink::WebInputEvent::kAltKey | blink::WebInputEvent::kMetaKey;
++
++bool IsDarkFrame(const ui::ColorProvider* color_provider) {
++  return color_utils::IsDark(color_provider->GetColor(ui::kColorFrameActive));
++}
++
++// Round button of the Glance column. The icon is the accent color over a
++// near-black (light theme) or near-white (dark theme) circle.
++class GlanceButton : public views::ImageButton {
++  METADATA_HEADER(GlanceButton, views::ImageButton)
++
++ public:
++  GlanceButton(PressedCallback callback,
++               const gfx::VectorIcon& icon,
++               const std::u16string& tooltip)
++      : views::ImageButton(std::move(callback)) {
++    SetImageModel(views::Button::STATE_NORMAL,
++                  ui::ImageModel::FromVectorIcon(
++                      icon, ui::kColorSysPrimary,
++                      kButtonSize - 2 * kButtonPadding));
++    SetImageHorizontalAlignment(ALIGN_CENTER);
++    SetImageVerticalAlignment(ALIGN_MIDDLE);
++    SetTooltipText(tooltip);
++    views::InstallCircleHighlightPathGenerator(this);
++  }
++
++  // views::ImageButton:
++  void OnPaintBackground(gfx::Canvas* canvas) override {
++    const ui::ColorProvider* color_provider = GetColorProvider();
++    const bool dark = IsDarkFrame(color_provider);
++    SkColor color;
++    if (GetState() == STATE_HOVERED || GetState() == STATE_PRESSED) {
++      color = dark ? SkColorSetRGB(0xCC, 0xCC, 0xCC)
++                   : SkColorSetRGB(0x29, 0x29, 0x29);
++    } else {
++      color = color_utils::AlphaBlend(
++          color_provider->GetColor(ui::kColorSysPrimary),
++          dark ? SkColorSetRGB(0xE2, 0xE2, 0xE2)
++               : SkColorSetRGB(0x1C, 0x1C, 0x1C),
++          0.04f);
++    }
++    cc::PaintFlags flags;
++    flags.setAntiAlias(true);
++    flags.setColor(color);
++    const gfx::RectF bounds(GetLocalBounds());
++    canvas->DrawCircle(bounds.CenterPoint(), bounds.width() / 2, flags);
++  }
++};
++
++BEGIN_METADATA(GlanceButton)
++END_METADATA
++
++// Contents of the Glance widget, which covers the whole tab: the faded tab,
++// the card with the previewed page, and the buttons.
++class GlanceView : public views::View {
++  METADATA_HEADER(GlanceView, views::View)
++
++ public:
++  GlanceView(GlanceController* controller, content::WebContents* contents)
++      : controller_(controller) {
++    web_view_ = AddChildView(
++        std::make_unique<views::WebView>(contents->GetBrowserContext()));
++    web_view_->SetWebContents(contents);
++    web_view_->holder()->SetNativeViewCornerRadii(
++        gfx::RoundedCornersF(kCardRadius));
++
++    std::u16string open_as_tab;
++    base::RemoveChars(
++        l10n_util::GetStringUTF16(IDS_CONTENT_CONTEXT_OPENLINKNEWTAB), u"&",
++        &open_as_tab);
++    buttons_.push_back(AddChildView(std::make_unique<GlanceButton>(
++        base::BindRepeating(&GlanceController::RequestClose,
++                            base::Unretained(controller)),
++        kCloseIcon, l10n_util::GetStringUTF16(IDS_APP_CLOSE))));
++    buttons_.push_back(AddChildView(std::make_unique<GlanceButton>(
++        base::BindRepeating(&GlanceController::RequestOpenAsTab,
++                            base::Unretained(controller), /*split=*/false),
++        kFullscreenIcon, open_as_tab)));
++    buttons_.push_back(AddChildView(std::make_unique<GlanceButton>(
++        base::BindRepeating(&GlanceController::RequestOpenAsTab,
++                            base::Unretained(controller), /*split=*/true),
++        kSplitSceneIcon,
++        l10n_util::GetStringUTF16(IDS_CONTENT_CONTEXT_OPENLINKSPLITVIEW))));
++  }
++
++  views::WebView* web_view() { return web_view_; }
++
++  // views::View:
++  void OnBoundsChanged(const gfx::Rect& previous_bounds) override {
++    const gfx::Rect bounds = GetLocalBounds();
++    card_ = bounds;
++    card_.set_width(base::ClampRound(bounds.width() * kCardWidthFraction));
++    card_.set_x(bounds.x() + (bounds.width() - card_.width()) / 2);
++    web_view_->SetBoundsRect(card_);
++
++    // Right of the card, kept inside the tab when the tab is narrow.
++    const int x = std::min(card_.right() + kButtonsSpacing,
++                           bounds.right() - kButtonSize);
++    int y = card_.y() + kButtonsTop + kButtonsSpacing;
++    for (views::View* button : buttons_) {
++      button->SetBoundsRect(gfx::Rect(x, y, kButtonSize, kButtonSize));
++      y += kButtonSize + kButtonsSpacing;
++    }
++  }
++
++  void OnPaint(gfx::Canvas* canvas) override {
++    const ui::ColorProvider* color_provider = GetColorProvider();
++    canvas->DrawColor(SkColorSetA(
++        color_provider->GetColor(ui::kColorFrameActive), kBackdropAlpha));
++
++    // The page background under the card, which also casts its shadow.
++    cc::PaintFlags flags;
++    flags.setAntiAlias(true);
++    flags.setColor(IsDarkFrame(color_provider) ? SkColorSetRGB(0x10, 0x10, 0x10)
++                                               : SK_ColorWHITE);
++    flags.setLooper(gfx::CreateShadowDrawLooper({gfx::ShadowValue(
++        kCardShadowOffset, kCardShadowBlur,
++        SkColorSetA(SK_ColorBLACK, kCardShadowAlpha))}));
++    canvas->DrawRoundRect(gfx::RectF(card_), kCardRadius, flags);
++  }
++
++  // A click on the faded tab closes the Glance.
++  bool OnMousePressed(const ui::MouseEvent& event) override {
++    return !card_.Contains(event.location());
++  }
++
++  void OnMouseReleased(const ui::MouseEvent& event) override {
++    if (!card_.Contains(event.location()) && HitTestPoint(event.location())) {
++      controller_->RequestClose();
++    }
++  }
++
++ private:
++  const raw_ptr<GlanceController> controller_;
++  raw_ptr<views::WebView> web_view_ = nullptr;
++  std::vector<raw_ptr<views::View>> buttons_;
++  gfx::Rect card_;
++};
++
++BEGIN_METADATA(GlanceView)
++END_METADATA
++
++}  // namespace
++
++GlanceController::GlanceController(BrowserWindowInterface& browser)
++    : browser_(browser) {
++  browser_->GetTabStripModel()->AddObserver(this);
++}
++
++GlanceController::~GlanceController() {
++  Destroy();
++}
++
++// static
++bool GlanceController::IsSupported(const BrowserWindowInterface& browser) {
++  return browser.GetType() == BrowserWindowInterface::TYPE_NORMAL;
++}
++
++void GlanceController::OnTargetURLChanged(content::WebContents* source,
++                                          const GURL& url) {
++  hovered_contents_ =
++      source ? source->GetWeakPtr() : base::WeakPtr<content::WebContents>();
++  hovered_url_ = url;
++}
++
++bool GlanceController::OnMouseEvent(content::WebContents* source,
++                                    const blink::WebMouseEvent& event) {
++  switch (event.GetType()) {
++    case blink::WebInputEvent::Type::kMouseDown: {
++      pressed_contents_ = nullptr;
++      // Alt and no other modifier, left button, on an http(s) link of a tab.
++      if ((event.GetModifiers() & kModifierMask) !=
++              blink::WebInputEvent::kAltKey ||
++          event.button != blink::WebPointerProperties::Button::kLeft) {
++        return false;
++      }
++      if (contents_ || !source || source != hovered_contents_.get() ||
++          !hovered_url_.SchemeIsHTTPOrHTTPS() ||
++          browser_->GetTabStripModel()->GetIndexOfWebContents(source) ==
++              TabStripModel::kNoTab) {
++        return false;
++      }
++      pressed_contents_ = source->GetWeakPtr();
++      pressed_url_ = hovered_url_;
++      pressed_point_ = event.PositionInScreen();
++      return true;
++    }
++    case blink::WebInputEvent::Type::kMouseMove:
++      if (!pressed_contents_ || source != pressed_contents_.get()) {
++        return false;
++      }
++      if (!(event.GetModifiers() & blink::WebInputEvent::kLeftButtonDown)) {
++        pressed_contents_ = nullptr;
++        return false;
++      }
++      return true;
++    case blink::WebInputEvent::Type::kMouseUp: {
++      if (!pressed_contents_ || source != pressed_contents_.get()) {
++        return false;
++      }
++      pressed_contents_ = nullptr;
++      const gfx::Vector2dF moved = event.PositionInScreen() - pressed_point_;
++      if (std::abs(moved.x()) <= kDragThreshold &&
++          std::abs(moved.y()) <= kDragThreshold) {
++        // Not from inside the input dispatch of `source`.
++        base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++            FROM_HERE,
++            base::BindOnce(&GlanceController::Open, weak_factory_.GetWeakPtr(),
++                           source->GetWeakPtr(), pressed_url_));
++      }
++      return true;
++    }
++    default:
++      return false;
++  }
++}
++
++void GlanceController::RequestClose() {
++  closing_ = true;
++  if (widget_) {
++    widget_->Hide();
++  }
++  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++      FROM_HERE,
++      base::BindOnce(&GlanceController::Close, weak_factory_.GetWeakPtr()));
++}
++
++void GlanceController::RequestOpenAsTab(bool split) {
++  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++      FROM_HERE, base::BindOnce(&GlanceController::OpenAsTab,
++                                weak_factory_.GetWeakPtr(), split));
++}
++
++content::WebContents* GlanceController::OpenURLFromTab(
++    content::WebContents* source,
++    const content::OpenURLParams& params,
++    base::OnceCallback<void(content::NavigationHandle&)>
++        navigation_handle_callback) {
++  if (params.disposition == WindowOpenDisposition::CURRENT_TAB) {
++    base::WeakPtr<content::NavigationHandle> handle =
++        source->GetController().LoadURLWithParams(
++            content::NavigationController::LoadURLParams(params));
++    if (navigation_handle_callback && handle) {
++      std::move(navigation_handle_callback).Run(*handle);
++    }
++    return source;
++  }
++  // New tabs and windows open from the tab under the Glance.
++  content::WebContents* parent = parent_.get();
++  if (!parent || !parent->GetDelegate()) {
++    return nullptr;
++  }
++  return parent->GetDelegate()->OpenURLFromTab(
++      parent, params, std::move(navigation_handle_callback));
++}
++
++content::WebContents* GlanceController::AddNewContents(
++    content::WebContents* source,
++    std::unique_ptr<content::WebContents> new_contents,
++    const GURL& target_url,
++    WindowOpenDisposition disposition,
++    const blink::mojom::WindowFeatures& window_features,
++    bool user_gesture,
++    bool* was_blocked) {
++  content::WebContents* parent = parent_.get();
++  if (!parent || !parent->GetDelegate()) {
++    return nullptr;
++  }
++  return parent->GetDelegate()->AddNewContents(
++      parent, std::move(new_contents), target_url, disposition,
++      window_features, user_gesture, was_blocked);
++}
++
++void GlanceController::CloseContents(content::WebContents* source) {
++  RequestClose();
++}
++
++bool GlanceController::HandleKeyboardEvent(
++    content::WebContents* source,
++    const input::NativeWebKeyboardEvent& event) {
++  if (event.GetType() == blink::WebInputEvent::Type::kRawKeyDown) {
++    const int modifiers = event.GetModifiers() & kModifierMask;
++    // Esc the page did not use closes; Ctrl+O opens as a tab, as in Zen.
++    if (event.windows_key_code == ui::VKEY_ESCAPE && !modifiers) {
++      RequestClose();
++      return true;
++    }
++    if (event.windows_key_code == ui::VKEY_O &&
++        modifiers == blink::WebInputEvent::kControlKey) {
++      RequestOpenAsTab(/*split=*/false);
++      return true;
++    }
++  }
++  // Other shortcuts work as in the tab under the Glance.
++  content::WebContents* parent = parent_.get();
++  return parent && parent->GetDelegate() &&
++         parent->GetDelegate()->HandleKeyboardEvent(source, event);
++}
++
++void GlanceController::OnTabStripModelChanged(
++    TabStripModel* tab_strip_model,
++    const TabStripModelChange& change,
++    const TabStripSelectionChange& selection) {
++  if (!contents_) {
++    return;
++  }
++  // After BrowserView has moved the contents around.
++  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++      FROM_HERE,
++      base::BindOnce(&GlanceController::Update, weak_factory_.GetWeakPtr()));
++}
++
++void GlanceController::OnViewBoundsChanged(views::View* observed_view) {
++  Update();
++}
++
++void GlanceController::OnViewIsDeleting(views::View* observed_view) {
++  view_observations_.RemoveAllObservations();
++  container_ = nullptr;
++  RequestClose();
++}
++
++void GlanceController::OnWidgetDestroying(views::Widget* widget) {
++  browser_widget_observation_.Reset();
++  Destroy();
++}
++
++void GlanceController::Open(base::WeakPtr<content::WebContents> parent,
++                            const GURL& url) {
++  if (!parent || contents_) {
++    return;
++  }
++  BrowserView* browser_view =
++      BrowserView::GetBrowserViewForBrowser(&*browser_);
++  if (!browser_view || !browser_view->GetWidget() ||
++      !browser_view->GetContentsContainerViewFor(parent.get())) {
++    return;
++  }
++  if (!browser_widget_observation_.IsObserving()) {
++    browser_widget_observation_.Observe(browser_view->GetWidget());
++  }
++  parent_ = parent;
++
++  contents_ = content::WebContents::Create(
++      content::WebContents::CreateParams(parent->GetBrowserContext()));
++  contents_->SetDelegate(this);
++  content::NavigationController::LoadURLParams load_params(url);
++  load_params.transition_type = ui::PAGE_TRANSITION_LINK;
++  load_params.referrer = content::Referrer::SanitizeForRequest(
++      url, content::Referrer(
++               parent->GetLastCommittedURL(),
++               network::mojom::ReferrerPolicy::kStrictOriginWhenCrossOrigin));
++  load_params.initiator_origin =
++      parent->GetPrimaryMainFrame()->GetLastCommittedOrigin();
++  contents_->GetController().LoadURLWithParams(load_params);
++
++  // A child of the browser window, like the find bar.
++  auto widget = std::make_unique<ThemeCopyingWidget>(browser_view->GetWidget());
++  views::Widget::InitParams params(
++      views::Widget::InitParams::CLIENT_OWNS_WIDGET,
++      views::Widget::InitParams::TYPE_CONTROL);
++  params.name = "SoraGlance";
++  params.parent = browser_view->GetWidget()->GetNativeView();
++  params.opacity = views::Widget::InitParams::WindowOpacity::kTranslucent;
++  params.activatable = views::Widget::InitParams::Activatable::kNo;
++  widget->Init(std::move(params));
++  GlanceView* view = widget->SetContentsView(
++      std::make_unique<GlanceView>(this, contents_.get()));
++  widget_ = std::move(widget);
++
++  Update();
++  if (!widget_ || !widget_->IsVisible()) {
++    return;
++  }
++  view->web_view()->RequestFocus();
++  if (gfx::Animation::ShouldRenderRichAnimation()) {
++    ui::Layer* layer = widget_->GetLayer();
++    layer->SetOpacity(0.0f);
++    ui::ScopedLayerAnimationSettings settings(layer->GetAnimator());
++    settings.SetTransitionDuration(kOpenDuration);
++    settings.SetTweenType(gfx::Tween::EASE_OUT);
++    layer->SetOpacity(1.0f);
++  }
++}
++
++void GlanceController::OpenAsTab(bool split) {
++  content::WebContents* parent = parent_.get();
++  if (!contents_ || !parent) {
++    return;
++  }
++  std::unique_ptr<content::WebContents> contents = std::move(contents_);
++  Destroy();
++  contents->SetDelegate(nullptr);
++  const GURL url = contents->GetVisibleURL();
++  // Inserted next to the tab, which adopts it with all its tab helpers. For
++  // split, Navigate() pairs it with the active tab, which is `parent`; if
++  // `parent` is already split it just opens as a tab.
++  chrome::AddWebContents(&*browser_, parent, std::move(contents), url,
++                         split ? WindowOpenDisposition::NEW_SPLIT_VIEW
++                               : WindowOpenDisposition::NEW_FOREGROUND_TAB,
++                         blink::mojom::WindowFeatures());
++}
++
++void GlanceController::Close() {
++  base::WeakPtr<content::WebContents> parent = parent_;
++  Destroy();
++  if (parent &&
++      browser_->GetTabStripModel()->GetActiveWebContents() == parent.get()) {
++    parent->Focus();
++  }
++}
++
++void GlanceController::Update() {
++  if (!contents_ || !widget_ || closing_) {
++    return;
++  }
++  if (!parent_ || browser_->GetTabStripModel()->GetIndexOfWebContents(
++                      parent_.get()) == TabStripModel::kNoTab) {
++    Destroy();
++    return;
++  }
++
++  // Follow the tab's contents container and every view above it, so the
++  // Glance moves with any layout change (sidebar width, split view, resize).
++  views::View* container = GetParentContainer();
++  if (container != container_) {
++    view_observations_.RemoveAllObservations();
++    container_ = container;
++    for (views::View* view = container; view; view = view->parent()) {
++      view_observations_.AddObservation(view);
++    }
++  }
++
++  // Hidden while another tab is shown; back when its tab is.
++  if (!container_ || !container_->IsDrawn()) {
++    widget_->Hide();
++    return;
++  }
++  widget_->SetBounds(
++      container_->ConvertRectToWidget(container_->GetLocalBounds()));
++  if (!widget_->IsVisible()) {
++    widget_->Show();
++  }
++  // Above the tab's web contents, which are attached again on tab switch.
++  widget_->StackAtTop();
++}
++
++void GlanceController::Destroy() {
++  view_observations_.RemoveAllObservations();
++  container_ = nullptr;
++  // The overlay first, since it shows `contents_`.
++  widget_.reset();
++  contents_.reset();
++  parent_ = nullptr;
++  closing_ = false;
++}
++
++views::View* GlanceController::GetParentContainer() {
++  BrowserView* browser_view =
++      BrowserView::GetBrowserViewForBrowser(&*browser_);
++  if (!browser_view || !parent_) {
++    return nullptr;
++  }
++  return browser_view->GetContentsContainerViewFor(parent_.get());
++}
+diff --git a/chrome/browser/ui/views/glance/glance_controller.h b/chrome/browser/ui/views/glance/glance_controller.h
+new file mode 100644
+index 0000000..4ce101c
+--- /dev/null
++++ b/chrome/browser/ui/views/glance/glance_controller.h
+@@ -0,0 +1,142 @@
++// Copyright 2026 The Sora Browser Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_UI_VIEWS_GLANCE_GLANCE_CONTROLLER_H_
++#define CHROME_BROWSER_UI_VIEWS_GLANCE_GLANCE_CONTROLLER_H_
++
++#include <memory>
++
++#include "base/memory/raw_ptr.h"
++#include "base/memory/raw_ref.h"
++#include "base/memory/weak_ptr.h"
++#include "base/scoped_multi_source_observation.h"
++#include "base/scoped_observation.h"
++#include "chrome/browser/ui/tabs/tab_strip_model_observer.h"
++#include "content/public/browser/web_contents_delegate.h"
++#include "ui/gfx/geometry/point_f.h"
++#include "ui/views/view_observer.h"
++#include "ui/views/widget/widget.h"
++#include "ui/views/widget/widget_observer.h"
++#include "url/gurl.h"
++
++class BrowserWindowInterface;
++
++namespace blink {
++class WebMouseEvent;
++}  // namespace blink
++
++namespace content {
++class WebContents;
++}  // namespace content
++
++// Sora: Glance, Zen's link preview (sora/zen-spec.md, section 10).
++//
++// Alt + click on a link opens it in a floating card over the tab it came from:
++// 80% of the width, full height, with the tab behind it faded into the frame
++// color. A column of round buttons next to the card closes it, opens it as a
++// tab, or opens it in split view next to the tab. Esc, a click outside the
++// card, or closing the tab also close it.
++//
++// The preview is a WebContents of its own, outside the tab strip, shown in a
++// child widget over the tab's contents container. Opening it as a tab hands
++// that WebContents to chrome::Navigate(), which adopts it (tab helpers and
++// all) like any other new tab, so the page is not loaded twice.
++//
++// One per browser window, owned by BrowserWebContentsDelegate, which feeds it
++// the hovered link (UpdateTargetURL) and the mouse events (PreHandleMouseEvent)
++// of every tab.
++class GlanceController : public content::WebContentsDelegate,
++                         public TabStripModelObserver,
++                         public views::ViewObserver,
++                         public views::WidgetObserver {
++ public:
++  explicit GlanceController(BrowserWindowInterface& browser);
++  GlanceController(const GlanceController&) = delete;
++  GlanceController& operator=(const GlanceController&) = delete;
++  ~GlanceController() override;
++
++  // Whether `browser` gets a Glance at all: normal tabbed windows only.
++  static bool IsSupported(const BrowserWindowInterface& browser);
++
++  // Called by BrowserWebContentsDelegate for every tab of the window.
++  void OnTargetURLChanged(content::WebContents* source, const GURL& url);
++  // Returns true when the event starts or finishes a Glance click and must not
++  // reach the page.
++  bool OnMouseEvent(content::WebContents* source,
++                    const blink::WebMouseEvent& event);
++
++  // Called from the overlay. They post the work, since the overlay is
++  // destroyed by it.
++  void RequestClose();
++  void RequestOpenAsTab(bool split);
++
++  // content::WebContentsDelegate (for the previewed page):
++  content::WebContents* OpenURLFromTab(
++      content::WebContents* source,
++      const content::OpenURLParams& params,
++      base::OnceCallback<void(content::NavigationHandle&)>
++          navigation_handle_callback) override;
++  content::WebContents* AddNewContents(
++      content::WebContents* source,
++      std::unique_ptr<content::WebContents> new_contents,
++      const GURL& target_url,
++      WindowOpenDisposition disposition,
++      const blink::mojom::WindowFeatures& window_features,
++      bool user_gesture,
++      bool* was_blocked) override;
++  void CloseContents(content::WebContents* source) override;
++  bool HandleKeyboardEvent(content::WebContents* source,
++                           const input::NativeWebKeyboardEvent& event) override;
++
++  // TabStripModelObserver:
++  void OnTabStripModelChanged(
++      TabStripModel* tab_strip_model,
++      const TabStripModelChange& change,
++      const TabStripSelectionChange& selection) override;
++
++  // views::ViewObserver:
++  void OnViewBoundsChanged(views::View* observed_view) override;
++  void OnViewIsDeleting(views::View* observed_view) override;
++
++  // views::WidgetObserver (the browser window):
++  void OnWidgetDestroying(views::Widget* widget) override;
++
++ private:
++  void Open(base::WeakPtr<content::WebContents> parent, const GURL& url);
++  void OpenAsTab(bool split);
++  void Close();
++  // Shows, hides, places or closes the Glance after its tab changed.
++  void Update();
++  // Destroys the overlay and the previewed page right away.
++  void Destroy();
++  views::View* GetParentContainer();
++
++  const raw_ref<BrowserWindowInterface> browser_;
++
++  // Link under the mouse, as reported to the status bubble.
++  base::WeakPtr<content::WebContents> hovered_contents_;
++  GURL hovered_url_;
++
++  // Alt + mouse down on a link, waiting for its mouse up.
++  base::WeakPtr<content::WebContents> pressed_contents_;
++  GURL pressed_url_;
++  gfx::PointF pressed_point_;
++
++  // The open Glance.
++  base::WeakPtr<content::WebContents> parent_;
++  std::unique_ptr<content::WebContents> contents_;
++  std::unique_ptr<views::Widget> widget_;
++  raw_ptr<views::View> container_ = nullptr;
++  // Hidden and about to be destroyed.
++  bool closing_ = false;
++
++  base::ScopedMultiSourceObservation<views::View, views::ViewObserver>
++      view_observations_{this};
++  base::ScopedObservation<views::Widget, views::WidgetObserver>
++      browser_widget_observation_{this};
++
++  base::WeakPtrFactory<GlanceController> weak_factory_{this};
++};
++
++#endif  // CHROME_BROWSER_UI_VIEWS_GLANCE_GLANCE_CONTROLLER_H_

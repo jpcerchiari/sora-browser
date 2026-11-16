@@ -1,0 +1,48 @@
+diff --git a/chrome/browser/ui/layout_constants.cc b/chrome/browser/ui/layout_constants.cc
+index bfde285..8f414c4 100644
+--- a/chrome/browser/ui/layout_constants.cc
++++ b/chrome/browser/ui/layout_constants.cc
+@@ -128,8 +128,9 @@ int GetLayoutConstant(LayoutConstant constant) {
+       return touch_ui ? 4 : 6;
+     case LayoutConstant::kTabstripToolbarOverlap:
+       return 1;
++    // Sora: Zen toolbar buttons are 28x28 (16px icon, 6px padding).
+     case LayoutConstant::kToolbarButtonHeight:
+-      return touch_ui ? 48 : 34;
++      return touch_ui ? 48 : 28;
+     case LayoutConstant::kToolbarButtonIconSize:
+       return touch_ui ? kDefaultTouchableIconSize
+                       : kDefaultIconSizeChromeRefresh;
+diff --git a/chrome/browser/ui/views/location_bar/location_bar_view.cc b/chrome/browser/ui/views/location_bar/location_bar_view.cc
+index d07cbfe..f620235 100644
+--- a/chrome/browser/ui/views/location_bar/location_bar_view.cc
++++ b/chrome/browser/ui/views/location_bar/location_bar_view.cc
+@@ -540,8 +540,9 @@ int LocationBarView::GetBorderRadius() const {
+ 
+ // static
+ int LocationBarView::ComputeBorderRadius(gfx::Size size) {
+-  return ChromeLayoutProvider::Get()->GetCornerRadiusMetric(
+-      views::Emphasis::kMaximum, size);
++  // Sora: Zen's 14px squircle URL bar, drawn as its ~6px round equivalent.
++  constexpr int kSoraLocationBarRadius = 6;
++  return std::min(kSoraLocationBarRadius, size.height() / 2);
+ }
+ 
+ // static
+diff --git a/chrome/browser/ui/views/toolbar/toolbar_button.cc b/chrome/browser/ui/views/toolbar/toolbar_button.cc
+index d4c4f01..1d24cbc 100644
+--- a/chrome/browser/ui/views/toolbar/toolbar_button.cc
++++ b/chrome/browser/ui/views/toolbar/toolbar_button.cc
+@@ -165,8 +165,10 @@ void ToolbarButton::ClearHighlight() {
+ }
+ 
+ int ToolbarButton::GetRoundedCornerRadius() const {
+-  return ChromeLayoutProvider::Get()->GetCornerRadiusMetric(
+-      views::Emphasis::kMaximum, GetTargetSize());
++  // Sora: Zen's 8px squircle toolbar buttons, drawn as their ~4px round
++  // equivalent.
++  constexpr int kSoraToolbarButtonRadius = 4;
++  return std::min(kSoraToolbarButtonRadius, GetTargetSize().height() / 2);
+ }
+ 
+ float ToolbarButton::GetCornerRadiusFor(ToolbarButton::Edge edge) const {

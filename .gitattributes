@@ -1,0 +1,3 @@
+# Patches must keep LF, or patch.exe on Windows adds CR to the patched files.
+*.patch text eol=lf
+series text eol=lf

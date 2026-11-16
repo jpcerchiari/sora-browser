@@ -1,0 +1,789 @@
+diff --git a/chrome/browser/ui/color/sora_color_mixer.cc b/chrome/browser/ui/color/sora_color_mixer.cc
+index f2e8562..5830970 100644
+--- a/chrome/browser/ui/color/sora_color_mixer.cc
++++ b/chrome/browser/ui/color/sora_color_mixer.cc
+@@ -59,6 +59,10 @@ constexpr SkAlpha kHoverAlpha = 0x12;       // 7% hover veil
+ constexpr SkAlpha kPressedAlpha = 0x1A;     // 10% pressed or open veil
+ constexpr SkAlpha kIconAlpha = 0xB3;        // toolbar icons at 70%
+ 
++// Sora: Zen's URL bar surface when open (--zen-urlbar-background-base).
++constexpr SkColor kSoraOmniboxSurfaceLight = SK_ColorWHITE;
++constexpr SkColor kSoraOmniboxSurfaceDark = SkColorSetRGB(0x18, 0x18, 0x18);
++
+ // Sora: Zen Essentials tiles (sora/zen-spec.md, section 3). Hover is black at
+ // 10% (light) or the essentials selected white at 20% (dark) over the frame;
+ // the selected tile's card is translucent so its blurred favicon shows
+@@ -172,6 +176,15 @@ void AddSoraColorMixer(ui::ColorProvider* provider,
+   mixer[kColorToolbarBackgroundSubtleEmphasisHovered] =
+       ui::AlphaBlend({p.element_hover}, background, p.element_hover_alpha);
+ 
++  // Sora: the open omnibox and its results share Zen's URL bar surface, which
++  // the floating omnibox also paints (location_bar_view.cc). Zen's acrylic
++  // variant (white at 93%, rgb(20,20,20) at 92%) needs a blurred backdrop, so
++  // this is its opaque fallback.
++  mixer[kColorOmniboxResultsBackground] =
++      key.color_mode == ui::ColorProviderKey::ColorMode::kDark
++          ? ui::ColorTransform(kSoraOmniboxSurfaceDark)
++          : ui::ColorTransform(kSoraOmniboxSurfaceLight);
++
+   // Sora: Essentials tiles rest on kColorToolbarBackgroundSubtleEmphasis (Zen's
+   // --zen-toolbar-element-bg) and use these for hover and selection.
+   const SoraEssentialsPalette& essentials =
+diff --git a/chrome/browser/ui/views/location_bar/location_bar_view.cc b/chrome/browser/ui/views/location_bar/location_bar_view.cc
+index 03d0cc1..ef9a644 100644
+--- a/chrome/browser/ui/views/location_bar/location_bar_view.cc
++++ b/chrome/browser/ui/views/location_bar/location_bar_view.cc
+@@ -15,8 +15,11 @@
+ #include "base/functional/bind.h"
+ #include "base/functional/callback_helpers.h"
+ #include "base/metrics/field_trial_params.h"
++#include "base/numerics/safe_conversions.h"
++#include "base/scoped_observation.h"
+ #include "base/trace_event/trace_event.h"
+ #include "build/build_config.h"
++#include "cc/paint/paint_flags.h"
+ #include "chrome/app/vector_icons/vector_icons.h"
+ #include "chrome/browser/actor/ui/actor_ui_window_controller.h"
+ #include "chrome/browser/autocomplete/aim_eligibility_service_factory.h"
+@@ -142,9 +145,15 @@
+ #include "ui/events/event.h"
+ #include "ui/gfx/animation/slide_animation.h"
+ #include "ui/gfx/canvas.h"
++#include "ui/gfx/color_utils.h"
++#include "ui/gfx/geometry/insets.h"
++#include "ui/gfx/geometry/rect_f.h"
+ #include "ui/gfx/geometry/skia_conversions.h"
++#include "ui/gfx/geometry/vector2d.h"
+ #include "ui/gfx/image/image.h"
+ #include "ui/gfx/paint_vector_icon.h"
++#include "ui/gfx/shadow_value.h"
++#include "ui/gfx/skia_paint_util.h"
+ #include "ui/gfx/text_utils.h"
+ #include "ui/gfx/vector_icon_types.h"
+ #include "ui/menus/simple_menu_model.h"
+@@ -165,6 +174,9 @@
+ #include "ui/views/style/typography_provider.h"
+ #include "ui/views/view.h"
+ #include "ui/views/view_class_properties.h"
++#include "ui/views/view_observer.h"
++#include "ui/views/view_targeter.h"
++#include "ui/views/view_targeter_delegate.h"
+ #include "ui/views/view_utils.h"
+ #include "ui/views/widget/widget.h"
+ 
+@@ -202,6 +214,187 @@ bool CanHostWebUIOmnibox(BrowserWindowInterface* browser, bool is_popup_mode) {
+   return !web_app::AppBrowserController::IsWebApp(browser) &&
+          browser->GetType() != BrowserWindowInterface::Type::TYPE_DEVTOOLS;
+ }
++
++// Sora: Zen's floating URL bar (zen.urlbar.behavior=floating-on-type). Values
++// from sora/zen-spec.md, section 4, "Flutuante".
++//
++// The field is 62px tall and min(window / 1.5, 750px) wide, but at least
++// min(90% of the window, 62rem); it is centered horizontally and its top sits
++// at half the window height minus max(333px, height) / 2.
++constexpr int kSoraFloatingHeight = 62;
++constexpr float kSoraFloatingWidthDivisor = 1.5f;
++constexpr int kSoraFloatingMaxWidth = 750;
++constexpr float kSoraFloatingMinWidthFraction = 0.9f;
++constexpr int kSoraFloatingMinWidthCap = 992;  // 62rem at 16px.
++constexpr int kSoraFloatingMinBlockHeight = 333;
++// Space between the field's edges and the text.
++constexpr int kSoraFloatingInlineMargin = 12;
++// Text at 1.15em.
++constexpr float kSoraFloatingFontScale = 1.15f;
++// 15px squircle, drawn as its ~6.5px round equivalent (15 / 2.3).
++constexpr float kSoraFloatingRadius = 6.5f;
++// Shadow 0 30px 140px -15px, black at 80% (light) or 60% (dark). Chromium's
++// ShadowValue blur is twice the CSS blur (see ui/gfx/shadow_value.cc).
++constexpr gfx::Vector2d kSoraFloatingShadowOffset(0, 30);
++constexpr double kSoraFloatingShadowBlur = 2 * 140;
++constexpr float kSoraFloatingShadowSpread = -15;
++constexpr SkAlpha kSoraFloatingShadowAlphaLight = 0xCC;
++constexpr SkAlpha kSoraFloatingShadowAlphaDark = 0x99;
++// 0.5px outline: black at 20% (light) or #4a4a4a (dark).
++constexpr float kSoraFloatingOutlineWidth = 0.5f;
++constexpr SkColor kSoraFloatingOutlineLight = SkColorSetARGB(0x33, 0, 0, 0);
++constexpr SkColor kSoraFloatingOutlineDark = SkColorSetRGB(0x4A, 0x4A, 0x4A);
++
++gfx::ShadowValues GetSoraFloatingShadows(bool dark) {
++  return {gfx::ShadowValue(
++      kSoraFloatingShadowOffset, kSoraFloatingShadowBlur,
++      SkColorSetA(SK_ColorBLACK, dark ? kSoraFloatingShadowAlphaDark
++                                      : kSoraFloatingShadowAlphaLight))};
++}
++
++// Sora: hosts the omnibox textfield while it floats. It is the last child of
++// the browser widget's root view, so it paints over the page, and it is
++// ignored by the root view's fill layout. Its bounds include the shadow; only
++// the field itself takes events. The results popup anchors to the field (see
++// LocationBarView::BoundsInScreen()) and paints its own frame around it.
++class SoraFloatingOmniboxHost : public views::View,
++                                public views::ViewObserver,
++                                public views::ViewTargeterDelegate {
++  METADATA_HEADER(SoraFloatingOmniboxHost, views::View)
++
++ public:
++  explicit SoraFloatingOmniboxHost(base::RepeatingClosure on_bounds_changed)
++      : on_bounds_changed_(std::move(on_bounds_changed)) {
++    SetPaintToLayer();
++    layer()->SetFillsBoundsOpaquely(false);
++    SetEventTargeter(std::make_unique<views::ViewTargeter>(this));
++    SetProperty(views::kViewIgnoredByLayoutKey, true);
++    SetVisible(false);
++  }
++  SoraFloatingOmniboxHost(const SoraFloatingOmniboxHost&) = delete;
++  SoraFloatingOmniboxHost& operator=(const SoraFloatingOmniboxHost&) = delete;
++  ~SoraFloatingOmniboxHost() override = default;
++
++  // Follows the size of the parent, the widget's root view.
++  void ObserveParent() {
++    parent_observation_.Reset();
++    if (parent()) {
++      parent_observation_.Observe(parent());
++    }
++    UpdateBounds();
++  }
++
++  gfx::Rect GetFieldBoundsInScreen() const {
++    gfx::Rect bounds = field_bounds_;
++    views::View::ConvertRectToScreen(this, &bounds);
++    return bounds;
++  }
++
++  void UpdateBounds() {
++    if (!parent()) {
++      return;
++    }
++    const gfx::Size area = parent()->size();
++    const int width = std::min(
++        area.width(),
++        std::max(std::min(base::ClampRound(area.width() /
++                                           kSoraFloatingWidthDivisor),
++                          kSoraFloatingMaxWidth),
++                 std::min(base::ClampRound(area.width() *
++                                           kSoraFloatingMinWidthFraction),
++                          kSoraFloatingMinWidthCap)));
++    const int top =
++        area.height() / 2 -
++        std::max(kSoraFloatingMinBlockHeight, kSoraFloatingHeight) / 2;
++    const gfx::Rect field((area.width() - width) / 2, top, width,
++                          kSoraFloatingHeight);
++
++    gfx::Rect bounds = field;
++    bounds.Inset(gfx::ShadowValue::GetMargin(GetSoraFloatingShadows(false)));
++    field_bounds_ = field - bounds.OffsetFromOrigin();
++    if (bounds == this->bounds()) {
++      return;
++    }
++    SetBoundsRect(bounds);
++    InvalidateLayout();
++    SchedulePaint();
++    on_bounds_changed_.Run();
++  }
++
++  // views::View:
++  void Layout(PassKey) override {
++    gfx::Rect contents = field_bounds_;
++    contents.Inset(gfx::Insets::VH(0, kSoraFloatingInlineMargin));
++    for (views::View* child : children()) {
++      child->SetBoundsRect(contents);
++    }
++  }
++
++  void OnPaint(gfx::Canvas* canvas) override {
++    const SkColor surface =
++        GetColorProvider()->GetColor(kColorOmniboxResultsBackground);
++    const bool dark = color_utils::IsDark(surface);
++    const gfx::RectF field(field_bounds_);
++
++    // The negative spread shrinks the shape that casts the shadow; the field
++    // painted on top hides it.
++    gfx::RectF caster = field;
++    caster.Inset(-kSoraFloatingShadowSpread);
++    cc::PaintFlags shadow_flags;
++    shadow_flags.setAntiAlias(true);
++    shadow_flags.setColor(surface);
++    shadow_flags.setLooper(
++        gfx::CreateShadowDrawLooper(GetSoraFloatingShadows(dark)));
++    canvas->DrawRoundRect(caster, kSoraFloatingRadius, shadow_flags);
++
++    cc::PaintFlags fill_flags;
++    fill_flags.setAntiAlias(true);
++    fill_flags.setColor(surface);
++    canvas->DrawRoundRect(field, kSoraFloatingRadius, fill_flags);
++
++    gfx::RectF outline = field;
++    outline.Outset(kSoraFloatingOutlineWidth / 2);
++    cc::PaintFlags outline_flags;
++    outline_flags.setAntiAlias(true);
++    outline_flags.setStyle(cc::PaintFlags::kStroke_Style);
++    outline_flags.setStrokeWidth(kSoraFloatingOutlineWidth);
++    outline_flags.setColor(dark ? kSoraFloatingOutlineDark
++                                : kSoraFloatingOutlineLight);
++    canvas->DrawRoundRect(outline,
++                          kSoraFloatingRadius + kSoraFloatingOutlineWidth / 2,
++                          outline_flags);
++  }
++
++  void OnThemeChanged() override {
++    views::View::OnThemeChanged();
++    SchedulePaint();
++  }
++
++  // views::ViewObserver:
++  void OnViewBoundsChanged(views::View* observed_view) override {
++    UpdateBounds();
++  }
++  void OnViewIsDeleting(views::View* observed_view) override {
++    parent_observation_.Reset();
++  }
++
++  // views::ViewTargeterDelegate:
++  bool DoesIntersectRect(const views::View* target,
++                         const gfx::Rect& rect) const override {
++    return field_bounds_.Intersects(rect);
++  }
++
++ private:
++  base::RepeatingClosure on_bounds_changed_;
++  // The field, in this view's coordinates.
++  gfx::Rect field_bounds_;
++  base::ScopedObservation<views::View, views::ViewObserver>
++      parent_observation_{this};
++};
++
++BEGIN_METADATA(SoraFloatingOmniboxHost)
++END_METADATA
++
+ }  // namespace
+ 
+ using content::WebContents;
+@@ -255,7 +448,9 @@ LocationBarView::LocationBarView(BrowserWindowInterface* browser,
+           // Show focus ring when the Omnibox is visibly focused and either the
+           // popup is closed or it's the full WebUI popup, which keeps the
+           // focused look (see `ShouldUsePopupOpenAppearance()`).
+-          return v->GetOmniboxController()->edit_model()->is_caret_visible() &&
++          // Sora: no ring around the placeholder of the floating omnibox.
++          return !v->sora_floating_ &&
++                 v->GetOmniboxController()->edit_model()->is_caret_visible() &&
+                  !v->ShouldUsePopupOpenAppearance();
+         }));
+     views::FocusRing::Get(this)->SetOutsetFocusRingDisabled(true);
+@@ -278,6 +473,13 @@ LocationBarView::LocationBarView(BrowserWindowInterface* browser,
+ }
+ 
+ LocationBarView::~LocationBarView() {
++  // Sora: the omnibox may still sit in the floating host; it is destroyed below
++  // from whichever parent holds it, and the empty host stays hidden.
++  sora_floating_ = false;
++  if (views::View* const host = sora_floating_host_.view()) {
++    host->SetVisible(false);
++  }
++
+   // Remove selected keyword view since it has a raw_ptr to the omnibox
+   // controller.
+   auto selected_keyword_view = RemoveChildViewT(selected_keyword_view_.get());
+@@ -290,7 +492,8 @@ LocationBarView::~LocationBarView() {
+   // holds a raw_ptr to the omnibox controller.
+   popup_state_changed_subscription_ = base::CallbackListSubscription();
+   omnibox_popup_view_.reset();
+-  RemoveChildViewT(omnibox_view_.ExtractAsDangling());
++  views::View* const omnibox_parent = omnibox_view_->parent();
++  omnibox_parent->RemoveChildViewT(omnibox_view_.ExtractAsDangling());
+ }
+ 
+ void LocationBarView::Init() {
+@@ -682,6 +885,11 @@ void LocationBarView::AddedToWidget() {
+ }
+ 
+ void LocationBarView::RemovedFromWidget() {
++  // Sora: bring the omnibox back and forget the host, which stays, empty and
++  // hidden, in the old widget.
++  SoraSetFloating(false);
++  sora_floating_host_.SetView(nullptr);
++
+   // No-op unless registered (see above).
+   if (focus_manager_) {
+     focus_manager_->RemoveFocusChangeListener(this);
+@@ -689,8 +897,26 @@ void LocationBarView::RemovedFromWidget() {
+   }
+ }
+ 
++void LocationBarView::OnWillChangeFocus(views::View* before,
++                                        views::View* now) {
++  // Sora: moving a view clears its focus, so float before the omnibox takes
++  // it.
++  if (!sora_floating_ && now && now == omnibox_view_.get() &&
++      SoraShouldFloatOnFocus()) {
++    SoraSetFloating(true);
++  }
++}
++
+ void LocationBarView::OnDidChangeFocus(views::View* before, views::View* now) {
+-  if (Contains(before) != Contains(now)) {
++  // Sora: land once focus left the floating omnibox (Enter, Escape, a click
++  // elsewhere, another window).
++  if (sora_floating_ &&
++      !(now && sora_floating_host_.view() &&
++        sora_floating_host_.view()->Contains(now))) {
++    SoraSetFloating(false);
++  }
++
++  if (SoraContains(before) != SoraContains(now)) {
+     NotifyFocusChanged();
+   }
+ 
+@@ -987,8 +1213,10 @@ void LocationBarView::Layout(PassKey) {
+   // the rounded ends.
+   location_bounds.Intersect(GetLocalBoundsWithoutEndcaps());
+ 
+-  if (!ime_inline_autocomplete_view_->GetVisible() &&
+-      !omnibox_additional_text_view_->GetVisible()) {
++  if (sora_floating_) {
++    // Sora: the floating host lays the omnibox out.
++  } else if (!ime_inline_autocomplete_view_->GetVisible() &&
++             !omnibox_additional_text_view_->GetVisible()) {
+     // Short circuit the below logic when the additional views aren't visible.
+     // This is necessary as resizing the omnibox can throw off it's scroll,
+     // i.e., which chars are visible when its text overflows its width.
+@@ -1133,7 +1361,8 @@ bool LocationBarView::ShouldCloseOmniboxPopup(ui::MouseEvent* event) {
+ 
+   auto* const view = static_cast<views::View*>(event->target());
+   CHECK(view);
+-  return !Contains(view);
++  // Sora: clicks in the floating omnibox are inside the location bar.
++  return !SoraContains(view);
+ }
+ 
+ ChipController* LocationBarView::GetChipController() {
+@@ -1206,6 +1435,13 @@ gfx::Rect LocationBarView::Bounds() const {
+ }
+ 
+ gfx::Rect LocationBarView::BoundsInScreen() const {
++  // Sora: the results popup anchors here, so it follows the floating field.
++  if (sora_floating_) {
++    if (const auto* const host = views::AsViewClass<SoraFloatingOmniboxHost>(
++            sora_floating_host_.view())) {
++      return host->GetFieldBoundsInScreen();
++    }
++  }
+   return GetBoundsInScreen();
+ }
+ 
+@@ -1422,6 +1658,23 @@ gfx::Rect LocationBarView::GetLocalBoundsWithoutEndcaps() const {
+ }
+ 
+ void LocationBarView::RefreshBackground() {
++  // Sora: while the omnibox floats, its slot in the sidebar is an empty
++  // placeholder in the hover color, and the omnibox matches the floating
++  // surface (sora/zen-spec.md, section 4).
++  if (sora_floating_) {
++    const auto* const color_provider = GetColorProvider();
++    background_color_ =
++        color_provider->GetColor(kColorLocationBarBackgroundHovered);
++    SetBackground(CreateRoundRectBackground(
++        background_color_, SK_ColorTRANSPARENT, size(),
++        /*blend_mode=*/SkBlendMode::kSrcOver,
++        /*antialias=*/true, /*should_border_scale=*/true));
++    omnibox_view_->SetBackgroundColor(
++        color_provider->GetColor(kColorOmniboxResultsBackground));
++    SchedulePaint();
++    return;
++  }
++
+   const double opacity = hover_animation_.GetCurrentValue();
+   const bool is_caret_visible =
+       GetOmniboxController()->edit_model()->is_caret_visible();
+@@ -1815,6 +2068,117 @@ void LocationBarView::OnPaintBorder(gfx::Canvas* canvas) {
+                    border_color);
+ }
+ 
++void LocationBarView::PaintChildren(const views::PaintInfo& paint_info) {
++  // Sora: the placeholder of the floating omnibox is empty.
++  if (sora_floating_) {
++    return;
++  }
++  views::View::PaintChildren(paint_info);
++}
++
++bool LocationBarView::SoraShouldFloatOnFocus() const {
++  // Zen floats the URL bar when it opens from the keyboard (Ctrl+L, F6, Tab)
++  // or for a new tab, not when it is clicked. Normal browser windows only.
++  if (is_popup_mode_ || is_full_webui_omnibox_ || !browser_ ||
++      browser_->GetType() != BrowserWindowInterface::Type::TYPE_NORMAL ||
++      !GetWidget() || !GetWidget()->GetRootView() || !IsDrawn()) {
++    return false;
++  }
++  // Focus coming back to the omnibox (window activation) stays in place.
++  const views::FocusManager* const focus_manager = GetFocusManager();
++  if (focus_manager && focus_manager->focus_change_reason() ==
++                           views::FocusManager::FocusChangeReason::kFocusRestore) {
++    return false;
++  }
++  return !omnibox_view_->SoraIsPointerDown();
++}
++
++void LocationBarView::SoraSetFloating(bool floating) {
++  if (floating == sora_floating_) {
++    return;
++  }
++
++  auto* host =
++      views::AsViewClass<SoraFloatingOmniboxHost>(sora_floating_host_.view());
++  if (floating) {
++    views::View* const root = GetWidget() ? GetWidget()->GetRootView() : nullptr;
++    if (!root) {
++      return;
++    }
++    if (!host) {
++      host = root->AddChildView(std::make_unique<SoraFloatingOmniboxHost>(
++          base::BindRepeating(&LocationBarView::SoraOnFloatingBoundsChanged,
++                              weak_factory_.GetWeakPtr())));
++      sora_floating_host_.SetView(host);
++    }
++    // Stay above anything added to the root view since the last time.
++    root->ReorderChildView(host, root->children().size());
++    host->ObserveParent();
++    host->SetVisible(true);
++
++    sora_floating_ = true;
++    sora_omnibox_index_ = GetIndexOf(omnibox_view_.get());
++    host->AddChildViewRaw(omnibox_view_.get());
++
++    sora_saved_font_list_ = omnibox_view_->GetFontList();
++    omnibox_view_->SetFontList(sora_saved_font_list_->DeriveWithSizeDelta(
++        base::ClampRound(sora_saved_font_list_->GetFontSize() *
++                         (kSoraFloatingFontScale - 1))));
++    omnibox_view_->SoraUpdateTextWeight();
++
++    // The placeholder takes no clicks.
++    sora_saved_can_process_events_ = GetCanProcessEventsWithinSubtree();
++    SetCanProcessEventsWithinSubtree(false);
++    host->InvalidateLayout();
++  } else {
++    sora_floating_ = false;
++    if (omnibox_view_->parent() != this) {
++      AddChildViewAt(omnibox_view_.get(),
++                     std::min(sora_omnibox_index_.value_or(children().size()),
++                              children().size()));
++    }
++    sora_omnibox_index_.reset();
++    if (sora_saved_font_list_) {
++      omnibox_view_->SetFontList(*sora_saved_font_list_);
++      omnibox_view_->SoraUpdateTextWeight();
++      sora_saved_font_list_.reset();
++    }
++    SetCanProcessEventsWithinSubtree(sora_saved_can_process_events_);
++    if (host) {
++      host->SetVisible(false);
++    }
++  }
++
++  if (views::FocusRing::Get(this)) {
++    views::FocusRing::Get(this)->Refresh();
++  }
++  if (GetColorProvider()) {
++    RefreshBackground();
++  }
++  InvalidateLayout();
++  SchedulePaint();
++  SoraOnFloatingBoundsChanged();
++}
++
++bool LocationBarView::SoraContains(const views::View* view) const {
++  if (Contains(view)) {
++    return true;
++  }
++  const views::View* const host = sora_floating_host_.view();
++  return sora_floating_ && host && host->Contains(view);
++}
++
++void LocationBarView::SoraOnFloatingBoundsChanged() {
++  if (!omnibox_popup_view_ || !omnibox_popup_view_->IsOpen()) {
++    return;
++  }
++  if (auto* const presenter = omnibox_popup_view_->presenter()) {
++    presenter->SynchronizePopupBounds();
++  } else {
++    omnibox_popup_view_->UpdatePopupAppearance();
++  }
++}
++
+ bool LocationBarView::OnMousePressed(const ui::MouseEvent& event) {
+   return omnibox_view_->OnMousePressed(
+       AdjustMouseEventLocationForOmniboxView(event));
+@@ -2265,7 +2629,8 @@ bool LocationBarView::IsFocusWithin() const {
+     }
+   }
+   const views::FocusManager* const focus_manager = GetFocusManager();
+-  return focus_manager && Contains(focus_manager->GetFocusedView());
++  // Sora: the floating omnibox counts as inside the location bar.
++  return focus_manager && SoraContains(focus_manager->GetFocusedView());
+ }
+ 
+ bool LocationBarView::OpenContextMenu() {
+diff --git a/chrome/browser/ui/views/location_bar/location_bar_view.h b/chrome/browser/ui/views/location_bar/location_bar_view.h
+index 317211c..6bc8d18 100644
+--- a/chrome/browser/ui/views/location_bar/location_bar_view.h
++++ b/chrome/browser/ui/views/location_bar/location_bar_view.h
+@@ -8,6 +8,7 @@
+ #include <stddef.h>
+ 
+ #include <memory>
++#include <optional>
+ #include <string>
+ #include <string_view>
+ #include <vector>
+@@ -38,11 +39,13 @@
+ #include "ui/gfx/animation/slide_animation.h"
+ #include "ui/gfx/color_palette.h"
+ #include "ui/gfx/font.h"
++#include "ui/gfx/font_list.h"
+ #include "ui/gfx/geometry/rect.h"
+ #include "ui/gfx/image/image.h"
+ #include "ui/views/animation/animation_delegate_views.h"
+ #include "ui/views/controls/focus_ring.h"
+ #include "ui/views/drag_controller.h"
++#include "ui/views/view_tracker.h"
+ 
+ #if BUILDFLAG(IS_MAC)
+ #include "components/webapps/common/web_app_id.h"
+@@ -242,6 +245,7 @@ class LocationBarView
+   void ChildPreferredSizeChanged(views::View* child) override;
+ 
+   // views::FocusChangeListener:
++  void OnWillChangeFocus(views::View* before, views::View* now) override;
+   void OnDidChangeFocus(views::View* before, views::View* now) override;
+ 
+   // IconLabelBubbleView::Delegate:
+@@ -279,6 +283,10 @@ class LocationBarView
+ 
+   void OnOmniboxFocused();
+   void OpenOmniboxPopup(bool query_zps = true);
++
++  // Sora: true while the omnibox floats in the middle of the window, as in
++  // Zen's zen.urlbar.behavior=floating-on-type (sora/zen-spec.md, section 4).
++  bool SoraIsFloating() const { return sora_floating_; }
+   void OnOmniboxBlurred();
+   // Returns true if Full WebUI Omnibox is enabled and ready to handle focus.
+   bool IsFullWebUiOmniboxReady() const;
+@@ -446,6 +454,7 @@ class LocationBarView
+   void VisibilityChanged(views::View* starting_from, bool is_visible) override;
+   void OnFocus() override;
+   void OnPaintBorder(gfx::Canvas* canvas) override;
++  void PaintChildren(const views::PaintInfo& paint_info) override;
+   // LocationBarView directs mouse button events from
+   // |omnibox_additional_text_view_| to |omnibox_view_| so that e.g., clicking
+   // the former will focus the latter.
+@@ -673,6 +682,25 @@ class LocationBarView
+ 
+   void OnMiddleClickPaste(base::TimeTicks event_timestamp, std::u16string text);
+ 
++  // Sora: floating omnibox (Zen's floating-on-type). The omnibox textfield
++  // moves into a view at the top of the browser widget's root view, centered
++  // over the window, and this view stays behind as an empty placeholder.
++  // Moving a view inside one widget clears its focus, so the omnibox floats
++  // before it takes focus (OnWillChangeFocus) and lands back after it lost it
++  // (OnDidChangeFocus).
++  bool SoraShouldFloatOnFocus() const;
++  void SoraSetFloating(bool floating);
++  // Contains(), counting the floating omnibox as part of the location bar.
++  bool SoraContains(const views::View* view) const;
++  // Called by the floating host when the window resizes.
++  void SoraOnFloatingBoundsChanged();
++
++  bool sora_floating_ = false;
++  views::ViewTracker sora_floating_host_;
++  std::optional<size_t> sora_omnibox_index_;
++  std::optional<gfx::FontList> sora_saved_font_list_;
++  bool sora_saved_can_process_events_ = true;
++
+   base::WeakPtrFactory<LocationBarView> weak_factory_{this};
+ };
+ 
+diff --git a/chrome/browser/ui/views/omnibox/omnibox_view_views.cc b/chrome/browser/ui/views/omnibox/omnibox_view_views.cc
+index b3f159f..1f7a6da 100644
+--- a/chrome/browser/ui/views/omnibox/omnibox_view_views.cc
++++ b/chrome/browser/ui/views/omnibox/omnibox_view_views.cc
+@@ -1781,7 +1781,11 @@ void OmniboxViewViews::OnGestureEvent(ui::GestureEvent* event) {
+     controller()->edit_model()->StartZeroSuggestRequest();
+   }
+ 
+-  views::Textfield::OnGestureEvent(event);
++  {
++    // Sora: a tap that focuses the omnibox keeps it in place.
++    base::AutoReset<bool> sora_gesture(&sora_gesture_in_progress_, true);
++    views::Textfield::OnGestureEvent(event);
++  }
+ 
+   if (select_all_on_gesture_tap_ &&
+       event->type() == ui::EventType::kGestureTap) {
+@@ -2318,8 +2322,18 @@ bool OmniboxViewViews::HandleKeyEvent(views::Textfield* textfield,
+       }
+       return true;
+     }
+-    case ui::VKEY_ESCAPE:
+-      return controller()->edit_model()->OnEscapeKeyPressed();
++    case ui::VKEY_ESCAPE: {
++      const bool handled = controller()->edit_model()->OnEscapeKeyPressed();
++      // Sora: as in Zen, Escape closes the floating URL bar at once: once the
++      // results are closed, focus goes back to the page and the omnibox lands
++      // in the sidebar (LocationBarView::OnDidChangeFocus()).
++      if (location_bar_view_ && location_bar_view_->SoraIsFloating() &&
++          !controller()->IsPopupOpen()) {
++        controller()->client()->FocusWebContents();
++        return true;
++      }
++      return handled;
++    }
+ 
+     case ui::VKEY_CONTROL:
+       controller()->edit_model()->OnControlKeyChanged(true);
+diff --git a/chrome/browser/ui/views/omnibox/omnibox_view_views.h b/chrome/browser/ui/views/omnibox/omnibox_view_views.h
+index 34475d5..4b39c01 100644
+--- a/chrome/browser/ui/views/omnibox/omnibox_view_views.h
++++ b/chrome/browser/ui/views/omnibox/omnibox_view_views.h
+@@ -162,6 +162,13 @@ class OmniboxViewViews
+   // after SetFontList(), which resets the weight.
+   void SoraUpdateTextWeight();
+ 
++  // Sora: true while a mouse button or a tap is down on the omnibox, i.e. when
++  // a focus change comes from the pointer. Zen's floating URL bar opens only
++  // for keyboard focus (see LocationBarView::SoraShouldFloatOnFocus()).
++  bool SoraIsPointerDown() const {
++    return is_mouse_pressed_ || sora_gesture_in_progress_;
++  }
++
+   // OmniboxView:
+   void EmphasizeURLComponents() override;
+   void Update() override;
+@@ -487,6 +494,10 @@ class OmniboxViewViews
+   // and gets a tap. So we use this variable to remember focus state before tap.
+   bool select_all_on_gesture_tap_ = false;
+ 
++  // Sora: true while views::Textfield handles a gesture, which may focus the
++  // omnibox.
++  bool sora_gesture_in_progress_ = false;
++
+   // Whether the user should be notified if the clipboard is restricted.
+   bool show_rejection_ui_if_any_ = false;
+ 
+diff --git a/chrome/browser/ui/views/omnibox/rounded_omnibox_results_frame.cc b/chrome/browser/ui/views/omnibox/rounded_omnibox_results_frame.cc
+index c018711..4fa8d70 100644
+--- a/chrome/browser/ui/views/omnibox/rounded_omnibox_results_frame.cc
++++ b/chrome/browser/ui/views/omnibox/rounded_omnibox_results_frame.cc
+@@ -163,6 +163,18 @@ class TopBackgroundView : public views::View {
+ 
+   void OnThemeChanged() override {
+     views::View::OnThemeChanged();
++    UpdateBackground();
++  }
++
++  // Sora: the hole follows this view's size, which the frame sets to the
++  // location bar's size, so it also fits the floating omnibox.
++  void OnBoundsChanged(const gfx::Rect& previous_bounds) override {
++    if (size() != previous_bounds.size() && GetColorProvider()) {
++      UpdateBackground();
++    }
++  }
++
++  void UpdateBackground() {
+     const SkColor background_color =
+         GetColorProvider()->GetColor(kColorOmniboxResultsBackground);
+ 
+@@ -170,8 +182,11 @@ class TopBackgroundView : public views::View {
+     // underlying antialiased location bar/toolbar edge.  The round rect here is
+     // not antialiased, since the goal is to completely cover the underlying
+     // pixels, and AA would let those on the edge partly bleed through.
++    // Sora: sized like this view (see OnBoundsChanged()), not like the location
++    // bar, which may be floating elsewhere.
+     SetBackground(LocationBarView::CreateRoundRectBackground(
+-        SK_ColorTRANSPARENT, background_color, location_bar_->Bounds().size(),
++        SK_ColorTRANSPARENT, background_color,
++        size().IsEmpty() ? location_bar_->Bounds().size() : size(),
+         SkBlendMode::kSrc, false));
+   }
+ 
+@@ -234,7 +249,9 @@ RoundedOmniboxResultsFrame::RoundedOmniboxResultsFrame(
+     views::View* contents,
+     LocationBar* location_bar,
+     bool forward_mouse_events)
+-    : contents_(contents), forward_mouse_events_(forward_mouse_events) {
++    : contents_(contents),
++      forward_mouse_events_(forward_mouse_events),
++      sora_location_bar_(location_bar) {
+   const int corner_radius = views::LayoutProvider::Get()->GetCornerRadiusMetric(
+       ChromeShapeContextTokens::kOmniboxExpandedRadius);
+   auto* webui_content = GetOmniboxPopupWebUIBaseContent();
+@@ -386,11 +403,22 @@ void RoundedOmniboxResultsFrame::Layout(PassKey) {
+ 
+   if (top_background_->GetVisible()) {
+     gfx::Rect top_bounds(contents_host_->GetContentsBounds());
+-    top_bounds.set_height(GetNonResultSectionHeight(true));
++    top_bounds.set_height(SoraGetNonResultSectionHeight(true));
+     top_bounds.Inset(GetLocationBarAlignmentInsets());
+     top_background_->SetBoundsRect(top_bounds);
+   }
+ 
++#if defined(USE_AURA)
++  // Sora: the cutout is taller while the omnibox floats, so keep the region
++  // whose clicks pass through to the omnibox in sync (see AddedToWidget()).
++  if (forward_mouse_events_ && GetWidget() && GetWidget()->GetNativeWindow()) {
++    if (aura::WindowTargeter* const targeter =
++            GetWidget()->GetNativeWindow()->targeter()) {
++      targeter->SetInsets(GetContentInsets());
++    }
++  }
++#endif  // USE_AURA
++
+   // `contents_` is null once it has been extracted during widget teardown (see
+   // `OmniboxPopupPresenterBase::OnWidgetClosed()`). The widget can still be
+   // laid out by the compositor between that point and its actual destruction,
+@@ -477,7 +505,19 @@ void RoundedOmniboxResultsFrame::OnMouseEvent(ui::MouseEvent* event) {
+ // Insets used to position |contents_| within |contents_host_|.
+ gfx::Insets RoundedOmniboxResultsFrame::GetContentInsets() {
+   return gfx::Insets::TLBR(
+-      GetNonResultSectionHeight(top_background_->GetVisible()), 0, 0, 0);
++      SoraGetNonResultSectionHeight(top_background_->GetVisible()), 0, 0, 0);
++}
++
++int RoundedOmniboxResultsFrame::SoraGetNonResultSectionHeight(
++    bool include_cutout) const {
++  if (!include_cutout || !sora_location_bar_) {
++    return GetNonResultSectionHeight(include_cutout);
++  }
++  const int location_bar_height = sora_location_bar_->BoundsInScreen().height();
++  if (location_bar_height <= 0) {
++    return GetNonResultSectionHeight(include_cutout);
++  }
++  return location_bar_height + GetLocationBarAlignmentInsets().height();
+ }
+ 
+ BEGIN_METADATA(RoundedOmniboxResultsFrame)
+diff --git a/chrome/browser/ui/views/omnibox/rounded_omnibox_results_frame.h b/chrome/browser/ui/views/omnibox/rounded_omnibox_results_frame.h
+index 5e58137..62f3c6b 100644
+--- a/chrome/browser/ui/views/omnibox/rounded_omnibox_results_frame.h
++++ b/chrome/browser/ui/views/omnibox/rounded_omnibox_results_frame.h
+@@ -77,6 +77,11 @@ class RoundedOmniboxResultsFrame : public views::View {
+ 
+   gfx::Insets GetContentInsets();
+ 
++  // Sora: height of the location bar part, from the location bar's actual
++  // height instead of the layout constant, so the cutout also fits the 62px
++  // floating omnibox (see LocationBarView::BoundsInScreen()).
++  int SoraGetNonResultSectionHeight(bool include_cutout) const;
++
+   raw_ptr<views::View> top_background_ = nullptr;
+   raw_ptr<views::View> contents_host_ = nullptr;
+   raw_ptr<views::View> contents_;
+@@ -87,6 +92,9 @@ class RoundedOmniboxResultsFrame : public views::View {
+   // True when the WebUI paints the popup's background, rounded corners and
+   // drop shadow instead of this frame. Determined at construction.
+   bool draw_shadow_in_webui_ = false;
++
++  // Sora: the location bar the popup is anchored to. May be null in tests.
++  raw_ptr<LocationBar> sora_location_bar_ = nullptr;
+ };
+ 
+ #endif  // CHROME_BROWSER_UI_VIEWS_OMNIBOX_ROUNDED_OMNIBOX_RESULTS_FRAME_H_

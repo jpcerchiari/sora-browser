@@ -1,0 +1,1221 @@
+diff --git a/chrome/browser/renderer_context_menu/render_view_context_menu.cc b/chrome/browser/renderer_context_menu/render_view_context_menu.cc
+index 97e8151..7b0e509 100644
+--- a/chrome/browser/renderer_context_menu/render_view_context_menu.cc
++++ b/chrome/browser/renderer_context_menu/render_view_context_menu.cc
+@@ -296,6 +296,7 @@
+ #include "ui/gfx/favicon_size.h"
+ #include "ui/gfx/geometry/point.h"
+ #include "ui/gfx/geometry/point_conversions.h"
++#include "ui/gfx/geometry/vector2d.h"
+ #include "ui/gfx/image/image.h"
+ #include "ui/gfx/image/image_skia.h"
+ #include "ui/gfx/image/image_skia_operations.h"
+@@ -391,6 +392,9 @@
+ 
+ #if !BUILDFLAG(IS_ANDROID)
+ #include "chrome/browser/devtools/devtools_policy_dialog.h"
++// Sora: "Open Link in Glance". nogncheck: a GN dep on the delegate's target
++// risks a cycle through //chrome/browser/ui; both end up in the same binary.
++#include "chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.h"  // nogncheck
+ #include "chrome/browser/ui/toasts/api/toast_id.h"
+ #include "chrome/browser/ui/toasts/toast_controller.h"
+ #include "chrome/browser/ui/toasts/toast_features.h"
+@@ -445,6 +449,10 @@ constexpr int IDC_SPELLCHECK_LANGUAGES_LAST =
+ 
+ constexpr int kTabMenuIconSize = 16;
+ 
++// Sora: "Open Link in Glance". A free id in the link items' range of
++// chrome_command_ids.h, kept here so that file stays untouched.
++constexpr int kSoraOpenLinkInGlanceCommandId = 50119;
++
+ base::OnceCallback<void(RenderViewContextMenu*)>* GetMenuShownCallback() {
+   static base::NoDestructor<base::OnceCallback<void(RenderViewContextMenu*)>>
+       callback;
+@@ -775,6 +783,11 @@ int CollapseCommandsForUMA(int id) {
+     return IDC_OPEN_LINK_IN_PROFILE_FIRST;
+   }
+ 
++  // Sora: counted as "Open Link in New Tab", which has a UMA value.
++  if (id == kSoraOpenLinkInGlanceCommandId) {
++    return IDC_CONTENT_CONTEXT_OPENLINKNEWTAB;
++  }
++
+   return id;
+ }
+ 
+@@ -2058,6 +2071,14 @@ void RenderViewContextMenu::AppendLinkItems() {
+                                            kOpenLinkInSplitMenuItem);
+       }
+     }
++
++    // Sora: "Open Link in Glance" (Zen's context menu item).
++    if (show_open_in_new_tab && IsNormalBrowser() &&
++        params_.link_url.SchemeIsHTTPOrHTTPS()) {
++      // TODO(sora): translated string (Zen's zen-open-link-in-glance).
++      menu_model_.AddItem(kSoraOpenLinkInGlanceCommandId,
++                          u"Open Link in Glance");
++    }
+ #endif
+ 
+     if (params_.link_url.is_valid()) {
+@@ -3561,6 +3582,11 @@ bool RenderViewContextMenu::IsCommandIdEnabled(int id) const {
+              params_.link_url.IsStandard() &&
+              IsOpenLinkAllowedByDlp(params_.link_url);
+ 
++    // Sora: "Open Link in Glance".
++    case kSoraOpenLinkInGlanceCommandId:
++      return navigation_allowed && params_.link_url.SchemeIsHTTPOrHTTPS() &&
++             IsOpenLinkAllowedByDlp(params_.link_url);
++
+     case IDC_CONTENT_CONTEXT_COPYLINKLOCATION:
+       return params_.unfiltered_link_url.is_valid();
+ 
+@@ -3949,6 +3975,21 @@ void RenderViewContextMenu::ExecuteCommand(int id, int event_flags) {
+     case IDC_CONTENT_CONTEXT_OPENLINKSPLITVIEW:
+ #if !BUILDFLAG(IS_ANDROID)
+       OpenLinkInSplitView(split_tabs::SplitTabLayout::kSideBySide);
++#endif  // !BUILDFLAG(IS_ANDROID)
++      break;
++
++    // Sora: "Open Link in Glance". The card flies from where the menu opened.
++    case kSoraOpenLinkInGlanceCommandId:
++#if !BUILDFLAG(IS_ANDROID)
++      if (BrowserWindowInterface* browser = GetBrowser()) {
++        if (BrowserWebContentsDelegate* delegate =
++                BrowserWebContentsDelegate::From(browser)) {
++          delegate->OpenLinkInGlance(
++              source_web_contents_, params_.link_url,
++              source_web_contents_->GetContainerBounds().origin() +
++                  gfx::Vector2d(params_.x, params_.y));
++        }
++      }
+ #endif  // !BUILDFLAG(IS_ANDROID)
+       break;
+     case IDC_CONTENT_CONTEXT_SAVELINKAS:
+diff --git a/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc b/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc
+index 01efaad..3b00301 100644
+--- a/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc
++++ b/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.cc
+@@ -790,11 +790,8 @@ void BrowserWebContentsDelegate::SetContentsBounds(content::WebContents* source,
+ void BrowserWebContentsDelegate::UpdateTargetURL(content::WebContents* source,
+                                                  const GURL& url) {
+   // Sora: Glance opens the link under the mouse.
+-  if (!glance_controller_ && GlanceController::IsSupported(*browser_)) {
+-    glance_controller_ = std::make_unique<GlanceController>(*browser_);
+-  }
+-  if (glance_controller_) {
+-    glance_controller_->OnTargetURLChanged(source, url);
++  if (GlanceController* glance_controller = GetGlanceController()) {
++    glance_controller->OnTargetURLChanged(source, url);
+   }
+ 
+   std::vector<StatusBubble*> status_bubbles =
+@@ -811,6 +808,27 @@ void BrowserWebContentsDelegate::UpdateTargetURL(content::WebContents* source,
+   }
+ }
+ 
++// Sora: glance-polish.
++bool BrowserWebContentsDelegate::SupportsGlance() const {
++  return GlanceController::IsSupported(*browser_);
++}
++
++void BrowserWebContentsDelegate::OpenLinkInGlance(
++    content::WebContents* source,
++    const GURL& url,
++    const gfx::Point& point_in_screen) {
++  if (GlanceController* glance_controller = GetGlanceController()) {
++    glance_controller->OpenLink(source, url, point_in_screen);
++  }
++}
++
++GlanceController* BrowserWebContentsDelegate::GetGlanceController() {
++  if (!glance_controller_ && GlanceController::IsSupported(*browser_)) {
++    glance_controller_ = std::make_unique<GlanceController>(*browser_);
++  }
++  return glance_controller_.get();
++}
++
+ // Sora: alt + click on a link opens it in Glance.
+ bool BrowserWebContentsDelegate::PreHandleMouseEvent(
+     content::WebContents* source,
+diff --git a/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.h b/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.h
+index 83769cf..fca7200 100644
+--- a/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.h
++++ b/chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.h
+@@ -12,6 +12,7 @@
+ #include "content/public/browser/file_select_listener.h"
+ #include "content/public/browser/web_contents_delegate.h"
+ #include "ui/base/unowned_user_data/scoped_unowned_user_data.h"
++#include "ui/gfx/geometry/point.h"
+ 
+ class BrowserUiController;
+ class BrowserWindow;
+@@ -53,6 +54,14 @@ class BrowserWebContentsDelegate : public content::WebContentsDelegate {
+   static const BrowserWebContentsDelegate* From(
+       const BrowserWindowInterface* browser);
+ 
++  // Sora: whether this window has Glance (normal tabbed windows).
++  bool SupportsGlance() const;
++  // Sora: "Open Link in Glance" from the context menu of a link in the tab
++  // `source`; the card flies from `point_in_screen`.
++  void OpenLinkInGlance(content::WebContents* source,
++                        const GURL& url,
++                        const gfx::Point& point_in_screen);
++
+   // content::WebContentsDelegate:
+   content::PictureInPictureResult EnterPictureInPicture(
+       content::WebContents* web_contents) override;
+@@ -265,6 +274,10 @@ class BrowserWebContentsDelegate : public content::WebContentsDelegate {
+       content::RenderFrameHost* render_frame_host) override;
+ 
+  private:
++  // Sora: the window's GlanceController, created on first use; null when the
++  // window has no Glance.
++  GlanceController* GetGlanceController();
++
+   const base::ElapsedTimer creation_timer_;
+ 
+   const raw_ref<ExclusiveAccessManager> exclusive_access_manager_;
+diff --git a/chrome/browser/ui/tab_helpers.h b/chrome/browser/ui/tab_helpers.h
+index c6e05eb..ebacd2b 100644
+--- a/chrome/browser/ui/tab_helpers.h
++++ b/chrome/browser/ui/tab_helpers.h
+@@ -26,6 +26,8 @@ class BrowserTabStripModelDelegate;
+ }  // namespace chrome
+ 
+ class PreviewTab;
++// Sora: Glance (chrome/browser/ui/views/glance).
++class GlanceController;
+ 
+ #endif  // BUILDFLAG(IS_ANDROID)
+ 
+@@ -78,6 +80,10 @@ class TabHelpers {
+ 
+   // Link Preview shows a preview of a page, then promote it as a new tab.
+   friend class PreviewTab;
++#if !BUILDFLAG(IS_ANDROID)
++  // Sora: Glance does the same as Link Preview did (PreviewTab is gone).
++  friend class GlanceController;
++#endif  // !BUILDFLAG(IS_ANDROID)
+ 
+   // FYI: Do NOT add any more friends here. The functions above are the ONLY
+   // ones that need to call AttachTabHelpers; if you think you do, re-read the
+diff --git a/chrome/browser/ui/views/glance/BUILD.gn b/chrome/browser/ui/views/glance/BUILD.gn
+index 250eb10..4d94a88 100644
+--- a/chrome/browser/ui/views/glance/BUILD.gn
++++ b/chrome/browser/ui/views/glance/BUILD.gn
+@@ -2,6 +2,8 @@
+ # Use of this source code is governed by a BSD-style license that can be
+ # found in the LICENSE file.
+ 
++import("//build/config/ui.gni")
++
+ assert(!is_android)
+ 
+ # Sora: Glance, Zen's link preview (sora/zen-spec.md, section 10).
+@@ -23,13 +25,17 @@ source_set("glance") {
+     "//chrome/app:generated_resources",
+     "//chrome/app/vector_icons",
+     "//chrome/browser/ui:browser_tabstrip",
++    # Sora: glance-polish (tab helpers, kColorSoraAccent, JS dialogs).
++    "//chrome/browser/ui:tab_helpers",
+     "//chrome/browser/ui/browser_window",
++    "//chrome/browser/ui/color:color_headers",
+     "//chrome/browser/ui/navigator",
+     "//chrome/browser/ui/tabs:tab_strip",
+     "//chrome/browser/ui/views:theme_copying_widget",
+     "//chrome/browser/ui/views/frame:browser_view_header",
+     "//chrome/browser/ui/views/frame:contents_container_view",
+     "//components/input",
++    "//components/javascript_dialogs",
+     "//skia",
+     "//third_party/blink/public/common:headers",
+     "//third_party/blink/public/mojom:mojom_platform",
+@@ -42,4 +48,8 @@ source_set("glance") {
+     "//ui/strings",
+     "//ui/views/controls/webview",
+   ]
++  if (use_aura) {
++    # Sora: scales the tab under the Glance.
++    deps += [ "//ui/aura" ]
++  }
+ }
+diff --git a/chrome/browser/ui/views/glance/glance_controller.cc b/chrome/browser/ui/views/glance/glance_controller.cc
+index b5e1d00..4f8de35 100644
+--- a/chrome/browser/ui/views/glance/glance_controller.cc
++++ b/chrome/browser/ui/views/glance/glance_controller.cc
+@@ -6,10 +6,12 @@
+ 
+ #include <algorithm>
+ #include <cmath>
++#include <optional>
+ #include <string>
+ #include <utility>
+ #include <vector>
+ 
++#include "base/auto_reset.h"
+ #include "base/functional/bind.h"
+ #include "base/location.h"
+ #include "base/numerics/safe_conversions.h"
+@@ -20,13 +22,18 @@
+ #include "chrome/app/vector_icons/vector_icons.h"
+ #include "chrome/browser/ui/browser_tabstrip.h"
+ #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
++#include "chrome/browser/ui/color/chrome_color_id.h"
+ #include "chrome/browser/ui/navigator/browser_navigator_params.h"
++#include "chrome/browser/ui/tab_helpers.h"
+ #include "chrome/browser/ui/tabs/tab_strip_model.h"
+ #include "chrome/browser/ui/views/frame/browser_view.h"
+ #include "chrome/browser/ui/views/frame/contents_container_view.h"
+ #include "chrome/browser/ui/views/theme_copying_widget.h"
+ #include "chrome/grit/generated_resources.h"
+ #include "components/input/native_web_keyboard_event.h"
++#include "components/javascript_dialogs/app_modal_dialog_manager.h"
++#include "content/public/browser/focused_node_details.h"
++#include "content/public/browser/keyboard_event_processing_result.h"
+ #include "content/public/browser/navigation_controller.h"
+ #include "content/public/browser/navigation_handle.h"
+ #include "content/public/browser/page_navigator.h"
+@@ -45,27 +52,42 @@
+ #include "ui/base/window_open_disposition.h"
+ #include "ui/color/color_id.h"
+ #include "ui/color/color_provider.h"
++#include "ui/color/color_variant.h"
+ #include "ui/compositor/layer.h"
+ #include "ui/compositor/scoped_layer_animation_settings.h"
+ #include "ui/events/event.h"
+ #include "ui/events/keycodes/keyboard_codes.h"
+ #include "ui/gfx/animation/animation.h"
++#include "ui/gfx/animation/linear_animation.h"
+ #include "ui/gfx/animation/tween.h"
+ #include "ui/gfx/canvas.h"
+ #include "ui/gfx/color_utils.h"
++#include "ui/gfx/font_list.h"
++#include "ui/gfx/geometry/insets.h"
++#include "ui/gfx/geometry/point_conversions.h"
+ #include "ui/gfx/geometry/rect.h"
++#include "ui/gfx/geometry/rect_conversions.h"
+ #include "ui/gfx/geometry/rect_f.h"
+ #include "ui/gfx/geometry/rounded_corners_f.h"
++#include "ui/gfx/geometry/size_f.h"
++#include "ui/gfx/geometry/transform.h"
++#include "ui/gfx/geometry/transform_util.h"
+ #include "ui/gfx/geometry/vector2d.h"
+ #include "ui/gfx/geometry/vector2d_f.h"
+ #include "ui/gfx/shadow_value.h"
+ #include "ui/gfx/skia_paint_util.h"
+ #include "ui/strings/grit/ui_strings.h"
++#include "ui/views/border.h"
+ #include "ui/views/controls/button/image_button.h"
+ #include "ui/views/controls/highlight_path_generator.h"
+ #include "ui/views/controls/native/native_view_host.h"
+ #include "ui/views/controls/webview/webview.h"
+ 
++#if defined(USE_AURA)
++#include "ui/aura/window.h"
++#include "ui/aura/window_observer.h"
++#endif
++
+ namespace {
+ 
+ // Values from sora/zen-spec.md, section 10.
+@@ -91,6 +113,46 @@ constexpr float kDragThreshold = 4.0f;
+ // zen.glance.animation-duration.
+ constexpr base::TimeDelta kOpenDuration = base::Milliseconds(350);
+ 
++// Sora: glance-polish, sora/zen-spec.md section 10, animation table.
++// The open arc and the tab behind follow a spring with bounce 0.2 that is
++// still (within 1%) after kOpenDuration, as ZenUIManager.springProgress().
++constexpr double kOpenSpringBounce = 0.2;
++constexpr double kSpringSettleDistance = 0.01;
++// Arc height: 40% of the distance flown, at most 30px and at most 60% of the
++// room on the side it bends to.
++constexpr float kArcHeightRatio = 0.4f;
++constexpr float kMaxArcHeight = 30.0f;
++constexpr float kArcRoomRatio = 0.6f;
++// The browser does not know the link's rect, so the card flies from a square
++// of this size around the click.
++constexpr int kLinkRectSize = 24;
++// The page fades in over the first quarter of the open.
++constexpr base::TimeDelta kPageFadeInDuration = kOpenDuration / 4;
++// The tab behind shrinks to this (GLANCE_BACKGROUND_SCALE); its fade to 0.3
++// is the backdrop veil.
++constexpr float kBackgroundScale = 0.97f;
++// Buttons fade in and slide from the card, after the arc is mostly done.
++constexpr base::TimeDelta kButtonsInDelay = base::Milliseconds(150);
++constexpr base::TimeDelta kButtonsInDuration = base::Milliseconds(200);
++constexpr float kButtonsInOffset = -20.0f;
++// Close: arc back in kOpenDuration (1 - (1 - t)^6), page fade 0.15s, buttons
++// 120ms, tab behind back in kOpenDuration / 1.5. The overlay goes when the
++// tab behind is back; the rest of the arc is invisible by then.
++constexpr double kCloseArcExponent = 6;
++constexpr base::TimeDelta kClosePageFadeDuration = base::Milliseconds(150);
++constexpr base::TimeDelta kCloseButtonsFadeDuration = base::Milliseconds(120);
++constexpr base::TimeDelta kCloseBackgroundDuration = kOpenDuration / 1.5;
++// Buttons: hover scale 1.02, pressed 0.98, in 0.05s.
++constexpr float kButtonHoverScale = 1.02f;
++constexpr float kButtonPressedScale = 0.98f;
++constexpr base::TimeDelta kButtonScaleDuration = base::Milliseconds(50);
++// Esc with a focused element: the X turns red and reads "Confirm" for 3s.
++constexpr base::TimeDelta kConfirmCloseTimeout = base::Seconds(3);
++constexpr SkColor kConfirmCloseColor = SkColorSetRGB(220, 53, 69);
++// The label is at most 4rem wide, 8px after the icon.
++constexpr int kConfirmLabelMaxWidth = 64;
++constexpr int kConfirmLabelSpacing = 8;
++
+ constexpr int kModifierMask =
+     blink::WebInputEvent::kShiftKey | blink::WebInputEvent::kControlKey |
+     blink::WebInputEvent::kAltKey | blink::WebInputEvent::kMetaKey;
+@@ -99,8 +161,65 @@ bool IsDarkFrame(const ui::ColorProvider* color_provider) {
+   return color_utils::IsDark(color_provider->GetColor(ui::kColorFrameActive));
+ }
+ 
++// Sora: position at `t` (0 to 1 of the duration) of an underdamped unit spring
++// released from rest, scaled so that it is within kSpringSettleDistance of 1
++// at t = 1. Overshoots 1 on the way.
++double SpringProgress(double t) {
++  if (t >= 1.0) {
++    return 1.0;
++  }
++  const double damping = 1.0 - kOpenSpringBounce;
++  const double root = std::sqrt(1.0 - damping * damping);
++  // Envelope exponent at t = 1: e^-decay = settle distance (with the phase
++  // term, as Zen computes the settle time).
++  const double decay = -std::log(kSpringSettleDistance * root / damping);
++  const double a = decay * t;
++  const double b = a * root / damping;
++  return 1.0 - std::exp(-a) * (std::cos(b) + damping / root * std::sin(b));
++}
++
++// Sora: rect of the card at `progress` of its flight from `from` to `to`,
++// along an arc that bends to the side with more room (Zen's
++// #createGlanceArcSequence).
++gfx::Rect ArcRect(const gfx::Rect& from,
++                  const gfx::Rect& to,
++                  double progress,
++                  int height) {
++  const gfx::PointF start = gfx::RectF(from).CenterPoint();
++  const gfx::PointF end = gfx::RectF(to).CenterPoint();
++  const gfx::SizeF from_size(from.size());
++  const gfx::SizeF to_size(to.size());
++  const float room_above = std::min(start.y(), end.y());
++  const float room_below =
++      static_cast<float>(height) - std::max(start.y(), end.y());
++  const bool downward = room_below > room_above;
++  const float arc_height = std::max(
++      0.0f, std::min({(end - start).Length() * kArcHeightRatio, kMaxArcHeight,
++                      (downward ? room_below : room_above) * kArcRoomRatio}));
++  const float bend = static_cast<float>(2 * progress - 1);
++  const float width = gfx::Tween::FloatValueBetween(
++      progress, from_size.width(), to_size.width());
++  const float card_height = gfx::Tween::FloatValueBetween(
++      progress, from_size.height(), to_size.height());
++  const float x = gfx::Tween::FloatValueBetween(progress, start.x(), end.x());
++  const float y = gfx::Tween::FloatValueBetween(progress, start.y(), end.y()) +
++                  (downward ? 1 : -1) * arc_height * (1 - bend * bend);
++  return gfx::ToEnclosingRect(gfx::RectF(x - width / 2, y - card_height / 2,
++                                         width, card_height));
++}
++
++// Sora: 0 to 1 over `duration`, starting `delay` into the animation.
++double Phase(base::TimeDelta elapsed,
++             base::TimeDelta duration,
++             base::TimeDelta delay = base::TimeDelta()) {
++  return std::clamp((elapsed - delay) / duration, 0.0, 1.0);
++}
++
+ // Round button of the Glance column. The icon is the accent color over a
+ // near-black (light theme) or near-white (dark theme) circle.
++// Sora: glance-polish. Zen accent (kColorSoraAccent), hover and pressed
++// scale, a layer for the entrance animation, and the close button's
++// "Confirm" state.
+ class GlanceButton : public views::ImageButton {
+   METADATA_HEADER(GlanceButton, views::ImageButton)
+ 
+@@ -108,15 +227,46 @@ class GlanceButton : public views::ImageButton {
+   GlanceButton(PressedCallback callback,
+                const gfx::VectorIcon& icon,
+                const std::u16string& tooltip)
+-      : views::ImageButton(std::move(callback)) {
+-    SetImageModel(views::Button::STATE_NORMAL,
+-                  ui::ImageModel::FromVectorIcon(
+-                      icon, ui::kColorSysPrimary,
+-                      kButtonSize - 2 * kButtonPadding));
++      : views::ImageButton(std::move(callback)), icon_(icon) {
++    UpdateImage();
+     SetImageHorizontalAlignment(ALIGN_CENTER);
+     SetImageVerticalAlignment(ALIGN_MIDDLE);
+     SetTooltipText(tooltip);
+-    views::InstallCircleHighlightPathGenerator(this);
++    // A circle while square, a pill while it shows "Confirm".
++    views::InstallPillHighlightPathGenerator(this);
++    SetPaintToLayer();
++    layer()->SetFillsBoundsOpaquely(false);
++  }
++
++  float entrance_opacity() const { return layer()->opacity(); }
++
++  // Opacity and horizontal offset while the column fades in or out.
++  void SetEntrance(float opacity, float offset_x) {
++    layer()->SetOpacity(opacity);
++    entrance_offset_ = offset_x;
++    UpdateTransform(/*animate=*/false);
++  }
++
++  // Red pill with a white icon and "Confirm", or back to the circle.
++  void SetConfirming(bool confirming) {
++    if (confirming_ == confirming) {
++      return;
++    }
++    confirming_ = confirming;
++    UpdateImage();
++    SetImageHorizontalAlignment(confirming_ ? ALIGN_LEFT : ALIGN_CENTER);
++    SetBorder(confirming_ ? views::CreateEmptyBorder(
++                                gfx::Insets::TLBR(0, kButtonPadding, 0, 0))
++                          : nullptr);
++    SchedulePaint();
++  }
++
++  // Width for the current state.
++  int GetWidth() const {
++    if (!confirming_) {
++      return kButtonSize;
++    }
++    return kButtonSize + kConfirmLabelSpacing + GetLabelWidth();
+   }
+ 
+   // views::ImageButton:
+@@ -124,12 +274,14 @@ class GlanceButton : public views::ImageButton {
+     const ui::ColorProvider* color_provider = GetColorProvider();
+     const bool dark = IsDarkFrame(color_provider);
+     SkColor color;
+-    if (GetState() == STATE_HOVERED || GetState() == STATE_PRESSED) {
++    if (confirming_) {
++      color = kConfirmCloseColor;
++    } else if (GetState() == STATE_HOVERED || GetState() == STATE_PRESSED) {
+       color = dark ? SkColorSetRGB(0xCC, 0xCC, 0xCC)
+                    : SkColorSetRGB(0x29, 0x29, 0x29);
+     } else {
+       color = color_utils::AlphaBlend(
+-          color_provider->GetColor(ui::kColorSysPrimary),
++          color_provider->GetColor(kColorSoraAccent),
+           dark ? SkColorSetRGB(0xE2, 0xE2, 0xE2)
+                : SkColorSetRGB(0x1C, 0x1C, 0x1C),
+           0.04f);
+@@ -138,8 +290,76 @@ class GlanceButton : public views::ImageButton {
+     flags.setAntiAlias(true);
+     flags.setColor(color);
+     const gfx::RectF bounds(GetLocalBounds());
+-    canvas->DrawCircle(bounds.CenterPoint(), bounds.width() / 2, flags);
++    canvas->DrawRoundRect(bounds, bounds.height() / 2, flags);
++  }
++
++  void PaintButtonContents(gfx::Canvas* canvas) override {
++    views::ImageButton::PaintButtonContents(canvas);
++    if (!confirming_) {
++      return;
++    }
++    const int height = label_font_list_.GetHeight();
++    canvas->DrawStringRect(
++        GetConfirmLabel(), label_font_list_, SK_ColorWHITE,
++        gfx::Rect(kButtonSize - kButtonPadding + kConfirmLabelSpacing,
++                  (GetLocalBounds().height() - height) / 2, GetLabelWidth(),
++                  height));
++  }
++
++  void OnBoundsChanged(const gfx::Rect& previous_bounds) override {
++    views::ImageButton::OnBoundsChanged(previous_bounds);
++    // The scale pivots around the center.
++    UpdateTransform(/*animate=*/false);
++  }
++
++  void StateChanged(ButtonState old_state) override {
++    views::ImageButton::StateChanged(old_state);
++    UpdateTransform(/*animate=*/true);
++  }
++
++ private:
++  // TODO(sora): translated string; Zen's is zen-glance-confirm-close.
++  static std::u16string GetConfirmLabel() { return u"Confirm"; }
++
++  int GetLabelWidth() const {
++    return std::min(
++        gfx::Canvas::GetStringWidth(GetConfirmLabel(), label_font_list_),
++        kConfirmLabelMaxWidth);
++  }
++
++  void UpdateImage() {
++    SetImageModel(views::Button::STATE_NORMAL,
++                  ui::ImageModel::FromVectorIcon(
++                      *icon_,
++                      confirming_ ? ui::ColorVariant(SK_ColorWHITE)
++                                  : ui::ColorVariant(kColorSoraAccent),
++                      kButtonSize - 2 * kButtonPadding));
++  }
++
++  void UpdateTransform(bool animate) {
++    float scale = 1.0f;
++    if (GetState() == STATE_PRESSED) {
++      scale = kButtonPressedScale;
++    } else if (GetState() == STATE_HOVERED) {
++      scale = kButtonHoverScale;
++    }
++    gfx::Transform transform = gfx::TransformAboutPivot(
++        gfx::RectF(GetLocalBounds()).CenterPoint(),
++        gfx::Transform::MakeScale(scale));
++    transform.PostTranslate(entrance_offset_, 0);
++    if (animate && gfx::Animation::ShouldRenderRichAnimation()) {
++      ui::ScopedLayerAnimationSettings settings(layer()->GetAnimator());
++      settings.SetTransitionDuration(kButtonScaleDuration);
++      layer()->SetTransform(transform);
++    } else {
++      layer()->SetTransform(transform);
++    }
+   }
++
++  const raw_ref<const gfx::VectorIcon> icon_;
++  const gfx::FontList label_font_list_;
++  bool confirming_ = false;
++  float entrance_offset_ = 0.0f;
+ };
+ 
+ BEGIN_METADATA(GlanceButton)
+@@ -163,10 +383,11 @@ class GlanceView : public views::View {
+     base::RemoveChars(
+         l10n_util::GetStringUTF16(IDS_CONTENT_CONTEXT_OPENLINKNEWTAB), u"&",
+         &open_as_tab);
+-    buttons_.push_back(AddChildView(std::make_unique<GlanceButton>(
++    close_button_ = AddChildView(std::make_unique<GlanceButton>(
+         base::BindRepeating(&GlanceController::RequestClose,
+                             base::Unretained(controller)),
+-        kCloseIcon, l10n_util::GetStringUTF16(IDS_APP_CLOSE))));
++        kCloseIcon, l10n_util::GetStringUTF16(IDS_APP_CLOSE)));
++    buttons_.push_back(close_button_);
+     buttons_.push_back(AddChildView(std::make_unique<GlanceButton>(
+         base::BindRepeating(&GlanceController::RequestOpenAsTab,
+                             base::Unretained(controller), /*split=*/false),
+@@ -180,28 +401,48 @@ class GlanceView : public views::View {
+ 
+   views::WebView* web_view() { return web_view_; }
+ 
++  // Sora: glance-polish animation state.
++  // Where the card rests.
++  const gfx::Rect& card() const { return card_; }
++  // Where the card is drawn: in flight during the animations.
++  gfx::Rect current_card() const { return animated_card_.value_or(card_); }
++  void SetAnimatedCard(std::optional<gfx::Rect> card) {
++    animated_card_ = card;
++    LayoutCard();
++    SchedulePaint();
++  }
++  // 0 to 1 of the backdrop veil.
++  void SetBackdropOpacity(float opacity) {
++    backdrop_opacity_ = opacity;
++    SchedulePaint();
++  }
++  float buttons_opacity() const { return close_button_->entrance_opacity(); }
++  void SetButtonsEntrance(float opacity, float offset_x) {
++    for (views::View* button : buttons_) {
++      static_cast<GlanceButton*>(button)->SetEntrance(opacity, offset_x);
++    }
++  }
++  void SetCloseConfirming(bool confirming) {
++    close_button_->SetConfirming(confirming);
++    LayoutButtons();
++  }
++
+   // views::View:
+   void OnBoundsChanged(const gfx::Rect& previous_bounds) override {
+     const gfx::Rect bounds = GetLocalBounds();
+     card_ = bounds;
+     card_.set_width(base::ClampRound(bounds.width() * kCardWidthFraction));
+     card_.set_x(bounds.x() + (bounds.width() - card_.width()) / 2);
+-    web_view_->SetBoundsRect(card_);
+-
+-    // Right of the card, kept inside the tab when the tab is narrow.
+-    const int x = std::min(card_.right() + kButtonsSpacing,
+-                           bounds.right() - kButtonSize);
+-    int y = card_.y() + kButtonsTop + kButtonsSpacing;
+-    for (views::View* button : buttons_) {
+-      button->SetBoundsRect(gfx::Rect(x, y, kButtonSize, kButtonSize));
+-      y += kButtonSize + kButtonsSpacing;
+-    }
++    LayoutCard();
++    LayoutButtons();
+   }
+ 
+   void OnPaint(gfx::Canvas* canvas) override {
+     const ui::ColorProvider* color_provider = GetColorProvider();
+-    canvas->DrawColor(SkColorSetA(
+-        color_provider->GetColor(ui::kColorFrameActive), kBackdropAlpha));
++    canvas->DrawColor(
++        SkColorSetA(color_provider->GetColor(ui::kColorFrameActive),
++                    base::ClampRound<SkAlpha>(kBackdropAlpha *
++                                              backdrop_opacity_)));
+ 
+     // The page background under the card, which also casts its shadow.
+     cc::PaintFlags flags;
+@@ -211,7 +452,7 @@ class GlanceView : public views::View {
+     flags.setLooper(gfx::CreateShadowDrawLooper({gfx::ShadowValue(
+         kCardShadowOffset, kCardShadowBlur,
+         SkColorSetA(SK_ColorBLACK, kCardShadowAlpha))}));
+-    canvas->DrawRoundRect(gfx::RectF(card_), kCardRadius, flags);
++    canvas->DrawRoundRect(gfx::RectF(current_card()), kCardRadius, flags);
+   }
+ 
+   // A click on the faded tab closes the Glance.
+@@ -226,19 +467,143 @@ class GlanceView : public views::View {
+   }
+ 
+  private:
++  // Sora: in flight, the page keeps the size of the resting card and is
++  // scaled into the flying one (NativeViewHost::SetNativeViewSize), so it
++  // does not relayout on every frame.
++  void LayoutCard() {
++    web_view_->SetBoundsRect(current_card());
++    web_view_->holder()->SetNativeViewSize(
++        animated_card_ ? card_.size() : gfx::Size());
++  }
++
++  void LayoutButtons() {
++    const gfx::Rect bounds = GetLocalBounds();
++    // Right of the card, kept inside the tab when the tab is narrow.
++    int y = card_.y() + kButtonsTop + kButtonsSpacing;
++    for (views::View* button : buttons_) {
++      const int width = static_cast<GlanceButton*>(button)->GetWidth();
++      const int x = std::min(card_.right() + kButtonsSpacing,
++                             bounds.right() - width);
++      button->SetBoundsRect(gfx::Rect(x, y, width, kButtonSize));
++      y += kButtonSize + kButtonsSpacing;
++    }
++  }
++
+   const raw_ptr<GlanceController> controller_;
+   raw_ptr<views::WebView> web_view_ = nullptr;
++  raw_ptr<GlanceButton> close_button_ = nullptr;
+   std::vector<raw_ptr<views::View>> buttons_;
+   gfx::Rect card_;
++  std::optional<gfx::Rect> animated_card_;
++  float backdrop_opacity_ = 1.0f;
+ };
+ 
+ BEGIN_METADATA(GlanceView)
+ END_METADATA
+ 
++GlanceView* GetGlanceView(views::Widget* widget) {
++  return widget ? static_cast<GlanceView*>(widget->GetContentsView())
++                : nullptr;
++}
++
+ }  // namespace
+ 
++// Sora: scales the tab under the Glance, as Zen scales its browser container.
++// The tab's page is an aura window hosted by the NativeViewHost of its
++// ContentsWebView, so a transform on that window shrinks the page without a
++// relayout. NativeViewHostAura::ShowWidget() sets the window's transform on
++// every layout of the host, so the scale goes back on after each change.
++#if defined(USE_AURA)
++class GlanceController::BackgroundScaler : public aura::WindowObserver {
++ public:
++  explicit BackgroundScaler(content::WebContents* contents)
++      : window_(contents->GetNativeView()) {
++    if (window_) {
++      base_transform_ = window_->transform();
++      observation_.Observe(window_.get());
++    }
++  }
++  BackgroundScaler(const BackgroundScaler&) = delete;
++  BackgroundScaler& operator=(const BackgroundScaler&) = delete;
++  ~BackgroundScaler() override {
++    if (window_ && window_->transform() != base_transform_) {
++      base::AutoReset<bool> applying(&applying_, true);
++      window_->SetTransform(base_transform_);
++    }
++  }
++
++  float scale() const { return scale_; }
++  void SetScale(float scale) {
++    scale_ = scale;
++    Apply();
++  }
++
++  // aura::WindowObserver:
++  void OnWindowTransformed(aura::Window* window,
++                           ui::PropertyChangeReason reason) override {
++    if (applying_) {
++      return;
++    }
++    base_transform_ = window->transform();
++    ApplySoon();
++  }
++  void OnWindowBoundsChanged(aura::Window* window,
++                             const gfx::Rect& old_bounds,
++                             const gfx::Rect& new_bounds,
++                             ui::PropertyChangeReason reason) override {
++    ApplySoon();
++  }
++  void OnWindowDestroying(aura::Window* window) override {
++    observation_.Reset();
++    window_ = nullptr;
++  }
++
++ private:
++  // Not from inside the window's own notifications.
++  void ApplySoon() {
++    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++        FROM_HERE, base::BindOnce(&BackgroundScaler::Apply,
++                                  weak_factory_.GetWeakPtr()));
++  }
++
++  void Apply() {
++    if (!window_) {
++      return;
++    }
++    gfx::Transform transform = base_transform_;
++    transform.PreConcat(gfx::TransformAboutPivot(
++        gfx::RectF(gfx::SizeF(window_->bounds().size())).CenterPoint(),
++        gfx::Transform::MakeScale(scale_)));
++    if (window_->transform() != transform) {
++      base::AutoReset<bool> applying(&applying_, true);
++      window_->SetTransform(transform);
++    }
++  }
++
++  raw_ptr<aura::Window> window_;
++  gfx::Transform base_transform_;
++  float scale_ = 1.0f;
++  bool applying_ = false;
++  base::ScopedObservation<aura::Window, aura::WindowObserver> observation_{
++      this};
++  base::WeakPtrFactory<BackgroundScaler> weak_factory_{this};
++};
++#else
++// Sora: other platforms keep the tab behind at its size, under the veil.
++class GlanceController::BackgroundScaler {
++ public:
++  explicit BackgroundScaler(content::WebContents* contents) {}
++  float scale() const { return 1.0f; }
++  void SetScale(float scale) {}
++};
++#endif  // defined(USE_AURA)
++
+ GlanceController::GlanceController(BrowserWindowInterface& browser)
+-    : browser_(browser) {
++    : browser_(browser),
++      animation_(std::make_unique<gfx::LinearAnimation>(
++          kOpenDuration,
++          gfx::LinearAnimation::kDefaultFrameRate,
++          this)) {
+   browser_->GetTabStripModel()->AddObserver(this);
+ }
+ 
+@@ -301,7 +666,8 @@ bool GlanceController::OnMouseEvent(content::WebContents* source,
+         base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
+             FROM_HERE,
+             base::BindOnce(&GlanceController::Open, weak_factory_.GetWeakPtr(),
+-                           source->GetWeakPtr(), pressed_url_));
++                           source->GetWeakPtr(), pressed_url_,
++                           pressed_point_));
+       }
+       return true;
+     }
+@@ -310,8 +676,47 @@ bool GlanceController::OnMouseEvent(content::WebContents* source,
+   }
+ }
+ 
++void GlanceController::OpenLink(content::WebContents* source,
++                                const GURL& url,
++                                const gfx::Point& point_in_screen) {
++  if (contents_ || !source || !url.SchemeIsHTTPOrHTTPS() ||
++      browser_->GetTabStripModel()->GetIndexOfWebContents(source) ==
++          TabStripModel::kNoTab) {
++    return;
++  }
++  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++      FROM_HERE,
++      base::BindOnce(&GlanceController::Open, weak_factory_.GetWeakPtr(),
++                     source->GetWeakPtr(), url, gfx::PointF(point_in_screen)));
++}
++
+ void GlanceController::RequestClose() {
++  CloseSoon(/*animate=*/true);
++}
++
++void GlanceController::CloseSoon(bool animate) {
++  if (closing_) {
++    return;
++  }
+   closing_ = true;
++  confirm_close_timer_.Stop();
++
++  // Sora: arc back to the link, as in Zen. Close() runs when it ends.
++  GlanceView* view = GetGlanceView(widget_.get());
++  if (animate && view && widget_->IsVisible() &&
++      gfx::Animation::ShouldRenderRichAnimation()) {
++    animation_->Stop();
++    close_from_card_ = view->current_card();
++    close_from_opacity_ = widget_->GetLayer()->opacity();
++    close_from_buttons_opacity_ = view->buttons_opacity();
++    close_from_scale_ = background_scaler_ ? background_scaler_->scale() : 1;
++    view->SetCanProcessEventsWithinSubtree(false);
++    phase_ = AnimationPhase::kClosing;
++    animation_->SetDuration(kCloseBackgroundDuration);
++    animation_->Start();
++    return;
++  }
++
+   if (widget_) {
+     widget_->Hide();
+   }
+@@ -370,6 +775,24 @@ void GlanceController::CloseContents(content::WebContents* source) {
+   RequestClose();
+ }
+ 
++content::KeyboardEventProcessingResult
++GlanceController::PreHandleKeyboardEvent(
++    content::WebContents* source,
++    const input::NativeWebKeyboardEvent& event) {
++  // Sora: Ctrl+W (and Ctrl+F4) would otherwise reach the window through
++  // HandleKeyboardEvent() and close the tab under the Glance. Zen closes the
++  // Glance's own tab, which is the Glance.
++  if (event.GetType() == blink::WebInputEvent::Type::kRawKeyDown &&
++      (event.GetModifiers() & kModifierMask) ==
++          blink::WebInputEvent::kControlKey &&
++      (event.windows_key_code == ui::VKEY_W ||
++       event.windows_key_code == ui::VKEY_F4)) {
++    RequestClose();
++    return content::KeyboardEventProcessingResult::HANDLED;
++  }
++  return content::KeyboardEventProcessingResult::NOT_HANDLED;
++}
++
+ bool GlanceController::HandleKeyboardEvent(
+     content::WebContents* source,
+     const input::NativeWebKeyboardEvent& event) {
+@@ -377,6 +800,18 @@ bool GlanceController::HandleKeyboardEvent(
+     const int modifiers = event.GetModifiers() & kModifierMask;
+     // Esc the page did not use closes; Ctrl+O opens as a tab, as in Zen.
+     if (event.windows_key_code == ui::VKEY_ESCAPE && !modifiers) {
++      // Sora: with an element of the page focused (say, while typing), the
++      // first Esc only arms the X for kConfirmCloseTimeout.
++      if (page_has_focused_element_ && !confirm_close_timer_.IsRunning()) {
++        if (GlanceView* view = GetGlanceView(widget_.get())) {
++          view->SetCloseConfirming(true);
++        }
++        confirm_close_timer_.Start(
++            FROM_HERE, kConfirmCloseTimeout,
++            base::BindOnce(&GlanceController::EndCloseConfirmation,
++                           base::Unretained(this)));
++        return true;
++      }
+       RequestClose();
+       return true;
+     }
+@@ -392,6 +827,40 @@ bool GlanceController::HandleKeyboardEvent(
+          parent->GetDelegate()->HandleKeyboardEvent(source, event);
+ }
+ 
++content::JavaScriptDialogManager* GlanceController::GetJavaScriptDialogManager(
++    content::WebContents* source) {
++  return javascript_dialogs::AppModalDialogManager::GetInstance();
++}
++
++void GlanceController::OnFocusChangedInPage(
++    const content::FocusedNodeDetails& details) {
++  // Blink reports an empty rect when focus goes back to the document.
++  page_has_focused_element_ = !details.node_bounds_in_screen.IsEmpty();
++}
++
++void GlanceController::PrimaryPageChanged(content::Page& page) {
++  page_has_focused_element_ = false;
++}
++
++void GlanceController::AnimationProgressed(const gfx::Animation* animation) {
++  AnimateFrame();
++}
++
++void GlanceController::AnimationEnded(const gfx::Animation* animation) {
++  const AnimationPhase phase = phase_;
++  phase_ = AnimationPhase::kNone;
++  if (phase != AnimationPhase::kClosing) {
++    return;
++  }
++  if (widget_) {
++    widget_->Hide();
++  }
++  // Not from inside the animation's own notification.
++  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++      FROM_HERE,
++      base::BindOnce(&GlanceController::Close, weak_factory_.GetWeakPtr()));
++}
++
+ void GlanceController::OnTabStripModelChanged(
+     TabStripModel* tab_strip_model,
+     const TabStripModelChange& change,
+@@ -412,7 +881,7 @@ void GlanceController::OnViewBoundsChanged(views::View* observed_view) {
+ void GlanceController::OnViewIsDeleting(views::View* observed_view) {
+   view_observations_.RemoveAllObservations();
+   container_ = nullptr;
+-  RequestClose();
++  CloseSoon(/*animate=*/false);
+ }
+ 
+ void GlanceController::OnWidgetDestroying(views::Widget* widget) {
+@@ -421,7 +890,8 @@ void GlanceController::OnWidgetDestroying(views::Widget* widget) {
+ }
+ 
+ void GlanceController::Open(base::WeakPtr<content::WebContents> parent,
+-                            const GURL& url) {
++                            const GURL& url,
++                            const gfx::PointF& point_in_screen) {
+   if (!parent || contents_) {
+     return;
+   }
+@@ -438,7 +908,12 @@ void GlanceController::Open(base::WeakPtr<content::WebContents> parent,
+ 
+   contents_ = content::WebContents::Create(
+       content::WebContents::CreateParams(parent->GetBrowserContext()));
++  // Sora: the tab helpers that are still attached outside TabFeatures
++  // (autofill, zoom, infobars, session id), as Link Preview's PreviewTab did.
++  // Opening as a tab adopts it again, which is a no-op.
++  TabHelpers::AttachTabHelpers(contents_.get());
+   contents_->SetDelegate(this);
++  Observe(contents_.get());
+   content::NavigationController::LoadURLParams load_params(url);
+   load_params.transition_type = ui::PAGE_TRANSITION_LINK;
+   load_params.referrer = content::Referrer::SanitizeForRequest(
+@@ -468,14 +943,22 @@ void GlanceController::Open(base::WeakPtr<content::WebContents> parent,
+     return;
+   }
+   view->web_view()->RequestFocus();
+-  if (gfx::Animation::ShouldRenderRichAnimation()) {
+-    ui::Layer* layer = widget_->GetLayer();
+-    layer->SetOpacity(0.0f);
+-    ui::ScopedLayerAnimationSettings settings(layer->GetAnimator());
+-    settings.SetTransitionDuration(kOpenDuration);
+-    settings.SetTweenType(gfx::Tween::EASE_OUT);
+-    layer->SetOpacity(1.0f);
++  background_scaler_ = std::make_unique<BackgroundScaler>(parent.get());
++
++  // Sora: the card flies from the link to its place.
++  if (!gfx::Animation::ShouldRenderRichAnimation()) {
++    background_scaler_->SetScale(kBackgroundScale);
++    return;
+   }
++  gfx::Point link_center = gfx::ToRoundedPoint(point_in_screen);
++  views::View::ConvertPointFromScreen(view, &link_center);
++  link_rect_ = gfx::Rect(link_center.x() - kLinkRectSize / 2,
++                         link_center.y() - kLinkRectSize / 2, kLinkRectSize,
++                         kLinkRectSize);
++  phase_ = AnimationPhase::kOpening;
++  animation_->SetDuration(kOpenDuration);
++  animation_->Start();
++  AnimateFrame();
+ }
+ 
+ void GlanceController::OpenAsTab(bool split) {
+@@ -496,6 +979,64 @@ void GlanceController::OpenAsTab(bool split) {
+                          blink::mojom::WindowFeatures());
+ }
+ 
++void GlanceController::AnimateFrame() {
++  GlanceView* view = GetGlanceView(widget_.get());
++  if (!view || phase_ == AnimationPhase::kNone) {
++    return;
++  }
++  const double t = animation_->GetCurrentValue();
++  const base::TimeDelta elapsed =
++      (phase_ == AnimationPhase::kOpening ? kOpenDuration
++                                          : kCloseBackgroundDuration) *
++      t;
++  const int height = view->GetLocalBounds().height();
++
++  if (phase_ == AnimationPhase::kOpening) {
++    const double progress = SpringProgress(t);
++    view->SetAnimatedCard(
++        t < 1.0 ? std::optional<gfx::Rect>(
++                      ArcRect(link_rect_, view->card(), progress, height))
++                : std::nullopt);
++    view->SetBackdropOpacity(
++        static_cast<float>(std::clamp(progress, 0.0, 1.0)));
++    background_scaler_->SetScale(
++        gfx::Tween::FloatValueBetween(progress, 1.0f, kBackgroundScale));
++    widget_->GetLayer()->SetOpacity(static_cast<float>(
++        gfx::Tween::CalculateValue(gfx::Tween::EASE_IN_OUT,
++                                   Phase(elapsed, kPageFadeInDuration))));
++    const float buttons = static_cast<float>(gfx::Tween::CalculateValue(
++        gfx::Tween::EASE_OUT,
++        Phase(elapsed, kButtonsInDuration, kButtonsInDelay)));
++    view->SetButtonsEntrance(buttons, (1 - buttons) * kButtonsInOffset);
++    return;
++  }
++
++  const double arc = 1 - std::pow(1 - Phase(elapsed, kOpenDuration),
++                                  kCloseArcExponent);
++  view->SetAnimatedCard(ArcRect(close_from_card_, link_rect_, arc, height));
++  widget_->GetLayer()->SetOpacity(static_cast<float>(
++      close_from_opacity_ *
++      (1 - gfx::Tween::CalculateValue(
++               gfx::Tween::EASE_IN_OUT,
++               Phase(elapsed, kClosePageFadeDuration)))));
++  view->SetButtonsEntrance(
++      static_cast<float>(close_from_buttons_opacity_ *
++                         (1 - Phase(elapsed, kCloseButtonsFadeDuration))),
++      0);
++  if (background_scaler_) {
++    background_scaler_->SetScale(gfx::Tween::FloatValueBetween(
++        gfx::Tween::CalculateValue(gfx::Tween::EASE_OUT,
++                                   Phase(elapsed, kCloseBackgroundDuration)),
++        close_from_scale_, 1.0f));
++  }
++}
++
++void GlanceController::EndCloseConfirmation() {
++  if (GlanceView* view = GetGlanceView(widget_.get())) {
++    view->SetCloseConfirming(false);
++  }
++}
++
+ void GlanceController::Close() {
+   base::WeakPtr<content::WebContents> parent = parent_;
+   Destroy();
+@@ -543,6 +1084,13 @@ void GlanceController::Update() {
+ void GlanceController::Destroy() {
+   view_observations_.RemoveAllObservations();
+   container_ = nullptr;
++  // Sora: stop the animations and put the tab behind back to its size.
++  phase_ = AnimationPhase::kNone;
++  animation_->Stop();
++  confirm_close_timer_.Stop();
++  background_scaler_.reset();
++  page_has_focused_element_ = false;
++  Observe(nullptr);
+   // The overlay first, since it shows `contents_`.
+   widget_.reset();
+   contents_.reset();
+diff --git a/chrome/browser/ui/views/glance/glance_controller.h b/chrome/browser/ui/views/glance/glance_controller.h
+index 4ce101c..5cae742 100644
+--- a/chrome/browser/ui/views/glance/glance_controller.h
++++ b/chrome/browser/ui/views/glance/glance_controller.h
+@@ -12,9 +12,14 @@
+ #include "base/memory/weak_ptr.h"
+ #include "base/scoped_multi_source_observation.h"
+ #include "base/scoped_observation.h"
++#include "base/timer/timer.h"
+ #include "chrome/browser/ui/tabs/tab_strip_model_observer.h"
+ #include "content/public/browser/web_contents_delegate.h"
++#include "content/public/browser/web_contents_observer.h"
++#include "ui/gfx/animation/animation_delegate.h"
++#include "ui/gfx/geometry/point.h"
+ #include "ui/gfx/geometry/point_f.h"
++#include "ui/gfx/geometry/rect.h"
+ #include "ui/views/view_observer.h"
+ #include "ui/views/widget/widget.h"
+ #include "ui/views/widget/widget_observer.h"
+@@ -30,6 +35,10 @@ namespace content {
+ class WebContents;
+ }  // namespace content
+ 
++namespace gfx {
++class LinearAnimation;
++}  // namespace gfx
++
+ // Sora: Glance, Zen's link preview (sora/zen-spec.md, section 10).
+ //
+ // Alt + click on a link opens it in a floating card over the tab it came from:
+@@ -46,7 +55,13 @@ class WebContents;
+ // One per browser window, owned by BrowserWebContentsDelegate, which feeds it
+ // the hovered link (UpdateTargetURL) and the mouse events (PreHandleMouseEvent)
+ // of every tab.
++//
++// Sora: glance-polish. The card flies in an arc from the clicked link, the tab
++// behind shrinks to 0.97, Esc asks for confirmation while a page element has
++// focus, and Ctrl+W closes only the Glance.
+ class GlanceController : public content::WebContentsDelegate,
++                         public content::WebContentsObserver,
++                         public gfx::AnimationDelegate,
+                          public TabStripModelObserver,
+                          public views::ViewObserver,
+                          public views::WidgetObserver {
+@@ -65,6 +80,11 @@ class GlanceController : public content::WebContentsDelegate,
+   // reach the page.
+   bool OnMouseEvent(content::WebContents* source,
+                     const blink::WebMouseEvent& event);
++  // Sora: "Open Link in Glance" from the context menu of a link in `source`.
++  // The card flies from `point_in_screen`, where the menu was opened.
++  void OpenLink(content::WebContents* source,
++                const GURL& url,
++                const gfx::Point& point_in_screen);
+ 
+   // Called from the overlay. They post the work, since the overlay is
+   // destroyed by it.
+@@ -86,8 +106,24 @@ class GlanceController : public content::WebContentsDelegate,
+       bool user_gesture,
+       bool* was_blocked) override;
+   void CloseContents(content::WebContents* source) override;
++  // Sora: Ctrl+W closes the Glance before the page or the window sees it.
++  content::KeyboardEventProcessingResult PreHandleKeyboardEvent(
++      content::WebContents* source,
++      const input::NativeWebKeyboardEvent& event) override;
+   bool HandleKeyboardEvent(content::WebContents* source,
+                            const input::NativeWebKeyboardEvent& event) override;
++  // Sora: alert(), confirm() and prompt() as window-modal dialogs, like
++  // DevTools; the tab-modal ones need a tab.
++  content::JavaScriptDialogManager* GetJavaScriptDialogManager(
++      content::WebContents* source) override;
++
++  // content::WebContentsObserver (the previewed page):
++  void OnFocusChangedInPage(const content::FocusedNodeDetails& details) override;
++  void PrimaryPageChanged(content::Page& page) override;
++
++  // gfx::AnimationDelegate:
++  void AnimationProgressed(const gfx::Animation* animation) override;
++  void AnimationEnded(const gfx::Animation* animation) override;
+ 
+   // TabStripModelObserver:
+   void OnTabStripModelChanged(
+@@ -103,9 +139,19 @@ class GlanceController : public content::WebContentsDelegate,
+   void OnWidgetDestroying(views::Widget* widget) override;
+ 
+  private:
+-  void Open(base::WeakPtr<content::WebContents> parent, const GURL& url);
++  class BackgroundScaler;
++  enum class AnimationPhase { kNone, kOpening, kClosing };
++
++  void Open(base::WeakPtr<content::WebContents> parent,
++            const GURL& url,
++            const gfx::PointF& point_in_screen);
+   void OpenAsTab(bool split);
++  // Closes with the animation when `animate` and the Glance is shown.
++  void CloseSoon(bool animate);
+   void Close();
++  // Applies the current frame of `animation_`.
++  void AnimateFrame();
++  void EndCloseConfirmation();
+   // Shows, hides, places or closes the Glance after its tab changed.
+   void Update();
+   // Destroys the overlay and the previewed page right away.
+@@ -131,6 +177,23 @@ class GlanceController : public content::WebContentsDelegate,
+   // Hidden and about to be destroyed.
+   bool closing_ = false;
+ 
++  // Sora: open and close animations.
++  std::unique_ptr<gfx::LinearAnimation> animation_;
++  AnimationPhase phase_ = AnimationPhase::kNone;
++  // Where the card flies from and back to, in the overlay's coordinates.
++  gfx::Rect link_rect_;
++  // State when the close started, which may be in the middle of the open.
++  gfx::Rect close_from_card_;
++  float close_from_opacity_ = 1.0f;
++  float close_from_buttons_opacity_ = 1.0f;
++  float close_from_scale_ = 1.0f;
++  // The tab under the Glance, scaled to 0.97.
++  std::unique_ptr<BackgroundScaler> background_scaler_;
++
++  // Sora: Esc with a focused element in the page waits for a second Esc.
++  bool page_has_focused_element_ = false;
++  base::OneShotTimer confirm_close_timer_;
++
+   base::ScopedMultiSourceObservation<views::View, views::ViewObserver>
+       view_observations_{this};
+   base::ScopedObservation<views::Widget, views::WidgetObserver>

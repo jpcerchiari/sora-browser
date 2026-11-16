@@ -1,0 +1,35 @@
+diff --git a/chrome/browser/ui/views/tabs/common/tab_view.cc b/chrome/browser/ui/views/tabs/common/tab_view.cc
+index 61a57c1..ff19096 100644
+--- a/chrome/browser/ui/views/tabs/common/tab_view.cc
++++ b/chrome/browser/ui/views/tabs/common/tab_view.cc
+@@ -79,6 +79,7 @@
+ #include "ui/compositor/layer.h"
+ #include "ui/events/keycodes/keyboard_codes.h"
+ #include "ui/events/types/event_type.h"
++#include "ui/gfx/font_list.h"
+ #include "ui/gfx/geometry/insets.h"
+ #include "ui/gfx/geometry/rect.h"
+ #include "ui/gfx/geometry/rounded_corners_f.h"
+@@ -366,6 +367,8 @@ TabView::TabView(TabCollectionNode* collection_node)
+   }
+ 
+   title_->SetProperty(views::kElementIdentifierKey, kVerticalTabTitleElementId);
++  // Sora: Zen tab titles are 14px, two above the 12px Windows UI font.
++  title_->SetFontList(gfx::FontList().DeriveWithSizeDelta(2));
+   SetProperty(views::kElementIdentifierKey, kTabElementId);
+   // Layout manager must be set after child views are created because the
+   // vertical layout stores pointers to those children.
+diff --git a/chrome/browser/ui/views/tabs/common/tab_view_vertical_layout.cc b/chrome/browser/ui/views/tabs/common/tab_view_vertical_layout.cc
+index 887adac..9747f25 100644
+--- a/chrome/browser/ui/views/tabs/common/tab_view_vertical_layout.cc
++++ b/chrome/browser/ui/views/tabs/common/tab_view_vertical_layout.cc
+@@ -191,7 +191,8 @@ bool TabViewVerticalLayout::IsChildVisible(const views::View* child_view,
+       return TabView().active_ && hovered_or_focused;
+     }
+ 
+-    return TabView().active_ || hovered_or_focused;
++    // Sora: as in Zen, the close button only shows on hover or focus.
++    return hovered_or_focused;
+   }
+ 
+   NOTREACHED() << "Unknown tab child view";

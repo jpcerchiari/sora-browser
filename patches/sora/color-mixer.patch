@@ -1,0 +1,204 @@
+diff --git a/chrome/browser/ui/color/BUILD.gn b/chrome/browser/ui/color/BUILD.gn
+index a73bb08..31177ee 100644
+--- a/chrome/browser/ui/color/BUILD.gn
++++ b/chrome/browser/ui/color/BUILD.gn
+@@ -42,6 +42,8 @@ source_set("mixers") {
+     "omnibox_color_mixer.h",
+     "product_specifications_color_mixer.cc",
+     "product_specifications_color_mixer.h",
++    "sora_color_mixer.cc",
++    "sora_color_mixer.h",
+     "tab_group_color_ids.h",
+     "tab_strip_color_mixer.cc",
+     "tab_strip_color_mixer.h",
+diff --git a/chrome/browser/ui/color/chrome_color_mixers.cc b/chrome/browser/ui/color/chrome_color_mixers.cc
+index 8432f49..956351c 100644
+--- a/chrome/browser/ui/color/chrome_color_mixers.cc
++++ b/chrome/browser/ui/color/chrome_color_mixers.cc
+@@ -22,6 +22,7 @@
+ #include "chrome/browser/ui/color/new_tab_page_color_mixer.h"
+ #include "chrome/browser/ui/color/omnibox_color_mixer.h"
+ #include "chrome/browser/ui/color/product_specifications_color_mixer.h"
++#include "chrome/browser/ui/color/sora_color_mixer.h"
+ #include "chrome/browser/ui/color/tab_strip_color_mixer.h"
+ #include "ui/color/color_provider_utils.h"
+ 
+@@ -88,6 +89,9 @@ void AddChromeColorMixers(ui::ColorProvider* provider,
+   // Must be the last one in order to override other mixer colors.
+   AddNativeChromeColorMixer(provider, key);
+ 
++  // Sora surfaces override the native ones; custom themes still win below.
++  AddSoraColorMixer(provider, key);
++
+   if (key.custom_theme) {
+     key.custom_theme->AddColorMixers(provider, key);
+   }
+diff --git a/chrome/browser/ui/color/sora_color_mixer.cc b/chrome/browser/ui/color/sora_color_mixer.cc
+new file mode 100644
+index 0000000..9e80aa4
+--- /dev/null
++++ b/chrome/browser/ui/color/sora_color_mixer.cc
+@@ -0,0 +1,138 @@
++// Copyright 2026 The Sora Browser Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/ui/color/sora_color_mixer.h"
++
++#include "chrome/browser/ui/color/chrome_color_id.h"
++#include "third_party/skia/include/core/SkColor.h"
++#include "ui/color/color_id.h"
++#include "ui/color/color_mixer.h"
++#include "ui/color/color_provider.h"
++#include "ui/color/color_provider_key.h"
++#include "ui/color/color_recipe.h"
++#include "ui/color/color_transform.h"
++
++namespace {
++
++// Values follow the Zen Browser default theme on Windows without Mica, with
++// no workspace gradient. See sora/zen-spec.md, section 7.
++struct SoraPalette {
++  SkColor main_background;    // #zen-browser-background
++  SkColor text_base;          // black or white, mixed with the accent
++  SkColor hover_veil;         // --zen-branding-bg-reverse
++  SkColor selected_veil;      // white veil of the selected tab
++  SkAlpha selected_veil_alpha;
++  SkAlpha selected_accent_alpha;
++  SkAlpha element_alpha;      // --zen-toolbar-element-bg
++  SkColor element_hover;      // toolbar element hover veil
++  SkAlpha element_hover_alpha;
++};
++
++constexpr SoraPalette kLight{
++    .main_background = SkColorSetRGB(0xE9, 0xE9, 0xE9),
++    .text_base = SK_ColorBLACK,
++    .hover_veil = SkColorSetRGB(0x10, 0x10, 0x10),
++    .selected_veil = SK_ColorWHITE,
++    .selected_veil_alpha = 0xCC,   // 80%
++    .selected_accent_alpha = 0x05,  // 2%
++    .element_alpha = 0x14,          // 8%
++    .element_hover = SK_ColorBLACK,
++    .element_hover_alpha = 0x14,    // 8%
++};
++
++constexpr SoraPalette kDark{
++    .main_background = SkColorSetRGB(0x13, 0x13, 0x13),
++    .text_base = SK_ColorWHITE,
++    .hover_veil = SkColorSetRGB(0xE2, 0xE2, 0xE2),
++    .selected_veil = SK_ColorWHITE,
++    .selected_veil_alpha = 0x2E,    // 18%
++    .selected_accent_alpha = 0x0D,  // 5%
++    .element_alpha = 0x26,          // 15%
++    .element_hover = SK_ColorWHITE,
++    .element_hover_alpha = 0x1A,    // 10%
++};
++
++constexpr SkAlpha kTextAccentAlpha = 0x1F;  // 12% accent in the text color
++constexpr SkAlpha kTextAlpha = 0xE6;        // text drawn at 90%
++constexpr SkAlpha kHoverAlpha = 0x12;       // 7% hover veil
++constexpr SkAlpha kPressedAlpha = 0x1A;     // 10% pressed or open veil
++constexpr SkAlpha kIconAlpha = 0xB3;        // toolbar icons at 70%
++
++}  // namespace
++
++void AddSoraColorMixer(ui::ColorProvider* provider,
++                       const ui::ColorProviderKey& key) {
++  // High contrast and forced colors keep the system palette.
++  if (key.contrast_mode == ui::ColorProviderKey::ContrastMode::kHigh ||
++      key.forced_colors != ui::ColorProviderKey::ForcedColors::kNone) {
++    return;
++  }
++
++  const SoraPalette& p =
++      key.color_mode == ui::ColorProviderKey::ColorMode::kDark ? kDark : kLight;
++  const ui::ColorTransform background = p.main_background;
++  // Zen tints the text with 12% of the accent and draws it at 90%.
++  const ui::ColorTransform text = ui::AlphaBlend(
++      ui::AlphaBlend({ui::kColorSysPrimary}, {p.text_base}, kTextAccentAlpha),
++      background, kTextAlpha);
++
++  ui::ColorMixer& mixer = provider->AddMixer();
++
++  // Frame, toolbar and the vertical tab strip share one surface.
++  mixer[ui::kColorFrameActive] = background;
++  mixer[ui::kColorFrameInactive] = background;
++  mixer[kColorToolbar] = background;
++  mixer[kColorToolbarText] = text;
++
++  // Toolbar buttons: icons at 70% of the text, a 7% veil on hover and 10%
++  // while pressed or open.
++  const ui::ColorTransform icon = ui::AlphaBlend(text, background, kIconAlpha);
++  for (const auto id :
++       {kColorToolbarButtonIcon, kColorToolbarButtonIconDefault,
++        kColorToolbarButtonIconHovered, kColorToolbarButtonIconPressed}) {
++    mixer[id] = icon;
++  }
++  mixer[kColorToolbarInkDrop] = {p.hover_veil};
++  mixer[kColorToolbarInkDropHover] = ui::SetAlpha({p.hover_veil}, kHoverAlpha);
++  mixer[kColorToolbarInkDropRipple] =
++      ui::SetAlpha({p.hover_veil}, kPressedAlpha);
++
++  // Tabs: transparent at rest, a 7% veil on hover, a white card when active.
++  const ui::ColorTransform tab_hover =
++      ui::AlphaBlend({p.hover_veil}, background, kHoverAlpha);
++  const ui::ColorTransform tab_active = ui::AlphaBlend(
++      {ui::kColorSysPrimary},
++      ui::AlphaBlend({p.selected_veil}, background, p.selected_veil_alpha),
++      p.selected_accent_alpha);
++  for (const auto id : {kColorTabBackgroundInactiveFrameActive,
++                        kColorTabBackgroundInactiveFrameInactive}) {
++    mixer[id] = background;
++  }
++  for (const auto id : {kColorTabBackgroundInactiveHoverFrameActive,
++                        kColorTabBackgroundInactiveHoverFrameInactive,
++                        kColorTabBackgroundSelectedFrameActive,
++                        kColorTabBackgroundSelectedFrameInactive}) {
++    mixer[id] = tab_hover;
++  }
++  for (const auto id : {kColorTabBackgroundActiveFrameActive,
++                        kColorTabBackgroundActiveFrameInactive,
++                        kColorTabBackgroundSelectedHoverFrameActive,
++                        kColorTabBackgroundSelectedHoverFrameInactive}) {
++    mixer[id] = tab_active;
++  }
++  // Zen keeps the same text color for selected and unselected tabs.
++  for (const auto id : {kColorTabForegroundActiveFrameActive,
++                        kColorTabForegroundActiveFrameInactive,
++                        kColorTabForegroundInactiveFrameActive,
++                        kColorTabForegroundInactiveFrameInactive}) {
++    mixer[id] = text;
++  }
++
++  // Omnibox at rest in the sidebar: the text color at 8% (light) or 15%
++  // (dark) over the frame, with a fixed veil on hover.
++  mixer[kColorToolbarBackgroundSubtleEmphasis] =
++      ui::AlphaBlend(text, background, p.element_alpha);
++  mixer[kColorToolbarBackgroundSubtleEmphasisHovered] =
++      ui::AlphaBlend({p.element_hover}, background, p.element_hover_alpha);
++}
+diff --git a/chrome/browser/ui/color/sora_color_mixer.h b/chrome/browser/ui/color/sora_color_mixer.h
+new file mode 100644
+index 0000000..29d2ac3
+--- /dev/null
++++ b/chrome/browser/ui/color/sora_color_mixer.h
+@@ -0,0 +1,19 @@
++// Copyright 2026 The Sora Browser Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_UI_COLOR_SORA_COLOR_MIXER_H_
++#define CHROME_BROWSER_UI_COLOR_SORA_COLOR_MIXER_H_
++
++namespace ui {
++class ColorProvider;
++struct ColorProviderKey;
++}  // namespace ui
++
++// Adds the Sora Browser surface colors (frame, toolbar, tabs, omnibox) to
++// `provider` with `key`. Must run after the native mixer and before custom
++// themes, so installed themes still win.
++void AddSoraColorMixer(ui::ColorProvider* provider,
++                       const ui::ColorProviderKey& key);
++
++#endif  // CHROME_BROWSER_UI_COLOR_SORA_COLOR_MIXER_H_

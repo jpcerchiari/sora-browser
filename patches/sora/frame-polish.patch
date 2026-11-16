@@ -1,0 +1,673 @@
+diff --git a/chrome/browser/ui/color/BUILD.gn b/chrome/browser/ui/color/BUILD.gn
+index 31177ee..3076cc3 100644
+--- a/chrome/browser/ui/color/BUILD.gn
++++ b/chrome/browser/ui/color/BUILD.gn
+@@ -63,6 +63,9 @@ source_set("mixers") {
+     "//ui/base:buildflags",
+     "//ui/color",
+     "//ui/color:mixers",
++
++    # Sora: color conversions for the Zen accent (sora_color_mixer.cc).
++    "//ui/gfx",
+   ]
+ 
+   if (is_chromeos) {
+diff --git a/chrome/browser/ui/color/chrome_color_id.h b/chrome/browser/ui/color/chrome_color_id.h
+index aec4669..2d371bd 100644
+--- a/chrome/browser/ui/color/chrome_color_id.h
++++ b/chrome/browser/ui/color/chrome_color_id.h
+@@ -1162,6 +1162,12 @@
+   E_CPONLY(kColorSoraEssentialTileHover) \
+   E_CPONLY(kColorSoraEssentialTileSelectedCard) \
+   E_CPONLY(kColorSoraEssentialTileSelectedCardHovered) \
++  /* Sora: Zen accent (--zen-primary-color), accent button background */ \
++  /* (--zen-accent-button-background) and the compact mode panel. */ \
++  E_CPONLY(kColorSoraAccent) \
++  E_CPONLY(kColorSoraAccentButtonBackground) \
++  E_CPONLY(kColorSoraCompactPanelBackground) \
++  E_CPONLY(kColorSoraCompactPanelOutline) \
+   /* WebAuthn colors. */ \
+   E_CPONLY(kColorWebAuthnHoverButtonForeground) \
+   E_CPONLY(kColorWebAuthnHoverButtonForegroundDisabled) \
+diff --git a/chrome/browser/ui/color/sora_color_mixer.cc b/chrome/browser/ui/color/sora_color_mixer.cc
+index 5830970..71a401c 100644
+--- a/chrome/browser/ui/color/sora_color_mixer.cc
++++ b/chrome/browser/ui/color/sora_color_mixer.cc
+@@ -4,6 +4,14 @@
+ 
+ #include "chrome/browser/ui/color/sora_color_mixer.h"
+ 
++#include <algorithm>
++#include <optional>
++#include <tuple>
++#include <utility>
++
++#include "base/functional/bind.h"
++#include "base/numerics/safe_conversions.h"
++#include "build/build_config.h"
+ #include "chrome/browser/ui/color/chrome_color_id.h"
+ #include "third_party/skia/include/core/SkColor.h"
+ #include "ui/color/color_id.h"
+@@ -12,6 +20,12 @@
+ #include "ui/color/color_provider_key.h"
+ #include "ui/color/color_recipe.h"
+ #include "ui/color/color_transform.h"
++#include "ui/gfx/color_conversions.h"
++#include "ui/gfx/color_utils.h"
++
++#if BUILDFLAG(IS_WIN)
++#include "ui/color/win/accent_color_observer.h"
++#endif
+ 
+ namespace {
+ 
+@@ -88,6 +102,161 @@ constexpr SoraEssentialsPalette kEssentialsDark{
+     .selected_card_hovered = SkColorSetARGB(0xBF, 0x44, 0x40, 0x40),  // 75%
+ };
+ 
++// Sora: Zen's accent color (sora/zen-spec.md, section 7;
++// ZenGradientGenerator.mjs getNativeAccentColor(), getAccentColorForUI(),
++// titleColors(); zen-buttons.css --zen-accent-button-background).
++//
++// Zen starts from a "dominant" color: the workspace theme's color when the
++// workspace has one, otherwise the system accent toned down against the
++// toolbar base. --zen-primary-color is the dominant color made livelier in
++// light mode; the toolbar text takes 12% of the dominant color.
++struct SoraAccentPalette {
++  SkColor toolbar_base;     // getToolbarModifiedBaseRaw()
++  float system_weight;      // share of the system accent mixed with the base
++  float darken_weight;      // share kept when darkening (1 = no darkening)
++  float button_min_lightness;  // oklch lightness clamp of the accent button
++  float button_max_lightness;
++};
++
++constexpr SoraAccentPalette kAccentLight{
++    .toolbar_base = SkColorSetRGB(240, 240, 244),
++    .system_weight = 0.5f,
++    .darken_weight = 1.0f,
++    .button_min_lightness = 0.35f,
++    .button_max_lightness = 0.6f,
++};
++
++constexpr SoraAccentPalette kAccentDark{
++    .toolbar_base = SkColorSetRGB(23, 23, 26),
++    .system_weight = 0.8f,
++    // blendColors(rgb, black, 40): 40% of the color, 60% black.
++    .darken_weight = 0.4f,
++    .button_min_lightness = 0.55f,
++    .button_max_lightness = 0.7f,
++};
++
++// getAccentColorForUI() in light mode: saturation +0.3 and the lightness
++// pulled 60% of the way to 0.42.
++constexpr double kAccentSaturationBoost = 0.3;
++constexpr double kAccentLightnessKeep = 0.4;
++constexpr double kAccentTargetLightness = 0.42;
++
++// Zen's private window primary (zen-theme.css), used for grayscale palettes
++// (incognito and the grayscale theme), which have no accent.
++constexpr SkColor kSoraGrayscaleAccent = SkColorSetRGB(11, 10, 11);
++
++// Zen's blendColors(): `weight` of `a` and the rest of `b`, rounded per channel.
++SkColor ZenBlend(SkColor a, SkColor b, float weight) {
++  const auto mix = [weight](U8CPU x, U8CPU y) {
++    return base::ClampRound<U8CPU>(x * weight + y * (1.0f - weight));
++  };
++  return SkColorSetRGB(mix(SkColorGetR(a), SkColorGetR(b)),
++                       mix(SkColorGetG(a), SkColorGetG(b)),
++                       mix(SkColorGetB(a), SkColorGetB(b)));
++}
++
++// getNativeAccentColor(): the system accent mixed with the toolbar base, and
++// darkened in dark mode.
++SkColor ZenDominantFromSystemAccent(SkColor system_accent, bool dark) {
++  const SoraAccentPalette& a = dark ? kAccentDark : kAccentLight;
++  const SkColor mixed =
++      ZenBlend(system_accent, a.toolbar_base, a.system_weight);
++  return ZenBlend(mixed, SK_ColorBLACK, a.darken_weight);
++}
++
++// getAccentColorForUI(): --zen-primary-color from the dominant color. Dark mode
++// and pure grays keep it as is.
++SkColor ZenPrimaryFromDominant(SkColor dominant, bool dark) {
++  dominant = SkColorSetA(dominant, SK_AlphaOPAQUE);
++  if (dark || (SkColorGetR(dominant) == SkColorGetG(dominant) &&
++               SkColorGetG(dominant) == SkColorGetB(dominant))) {
++    return dominant;
++  }
++  color_utils::HSL hsl;
++  color_utils::SkColorToHSL(dominant, &hsl);
++  hsl.s = std::min(1.0, hsl.s + kAccentSaturationBoost);
++  hsl.l = hsl.l * kAccentLightnessKeep +
++          kAccentTargetLightness * (1.0 - kAccentLightnessKeep);
++  return color_utils::HSLToSkColor(hsl, SK_AlphaOPAQUE);
++}
++
++// --zen-accent-button-background: oklch(from primary clamp(min, l, max) c h).
++SkColor ZenAccentButtonFromPrimary(SkColor primary, bool dark) {
++  const SoraAccentPalette& a = dark ? kAccentDark : kAccentLight;
++  const auto [x, y, z] = gfx::SRGBToXYZD50(SkColorGetR(primary) / 255.0f,
++                                           SkColorGetG(primary) / 255.0f,
++                                           SkColorGetB(primary) / 255.0f);
++  auto [l, ok_a, ok_b] = gfx::XYZD50ToOklab(x, y, z);
++  // Changing only the lightness keeps chroma and hue, as in oklch().
++  l = std::clamp(l, a.button_min_lightness, a.button_max_lightness);
++  const auto [x2, y2, z2] =
++      gfx::OklabToXYZD50(l, ok_a, ok_b, /*gamut_map=*/true);
++  const auto [r, g, b] = gfx::XYZD50ToSRGB(x2, y2, z2);
++  const auto channel = [](float v) {
++    return base::ClampRound<U8CPU>(std::clamp(v, 0.0f, 1.0f) * 255.0f);
++  };
++  return SkColorSetRGB(channel(r), channel(g), channel(b));
++}
++
++// The Zen accent steps above, run on another color when the mixer resolves it.
++enum class AccentStep { kDominantFromSystemAccent, kPrimary, kAccentButton };
++
++ui::ColorTransform DeriveAccent(ui::ColorTransform input,
++                                AccentStep step,
++                                bool dark) {
++  const auto generator = [](ui::ColorTransform input, AccentStep step,
++                            bool dark, SkColor input_color,
++                            const ui::ColorMixer& mixer) {
++    const SkColor color = input.Run(input_color, mixer);
++    switch (step) {
++      case AccentStep::kDominantFromSystemAccent:
++        return ZenDominantFromSystemAccent(color, dark);
++      case AccentStep::kPrimary:
++        return ZenPrimaryFromDominant(color, dark);
++      case AccentStep::kAccentButton:
++        return ZenAccentButtonFromPrimary(color, dark);
++    }
++  };
++  return base::BindRepeating(generator, std::move(input), step, dark);
++}
++
++// Zen's dominant color for `key`. `key.user_color` is, from strongest to
++// weakest: the active workspace's group color (focus mode sets the browser
++// widget's user color override), the color picked in Customize Chrome, then
++// the OS accent (on Windows, ui::NativeTheme passes on the DWM accent from
++// ui::AccentColorObserver). As in Zen, a workspace or picked color is used as
++// is, like a workspace theme, and only the OS accent is toned down.
++ui::ColorTransform GetZenDominantColor(const ui::ColorProviderKey& key,
++                                       bool dark) {
++  if (key.user_color_source ==
++      ui::ColorProviderKey::UserColorSource::kGrayscale) {
++    return {kSoraGrayscaleAccent};
++  }
++#if BUILDFLAG(IS_WIN)
++  const std::optional<SkColor> system_accent =
++      ui::AccentColorObserver::Get()->accent_color();
++#else
++  // Sora only ships on Windows; elsewhere every user color counts as a theme.
++  const std::optional<SkColor> system_accent = std::nullopt;
++#endif
++  if (key.user_color && key.user_color != system_accent) {
++    return {SkColorSetA(*key.user_color, SK_AlphaOPAQUE)};
++  }
++  // The OS accent, or Chromium's primary when the OS has none.
++  const ui::ColorTransform accent =
++      key.user_color ? ui::ColorTransform(*key.user_color)
++                     : ui::ColorTransform(ui::kColorSysPrimary);
++  return DeriveAccent(accent, AccentStep::kDominantFromSystemAccent, dark);
++}
++
++// Sora: Zen's compact mode sidebar (sora/zen-spec.md, section 6;
++// getToolbarModifiedBase() and zen-compact-mode.css): its own surface and a
++// 1px white outline at 15% just inside its edge.
++constexpr SkColor kSoraCompactPanelLight = SkColorSetRGB(240, 240, 244);
++constexpr SkColor kSoraCompactPanelDark = SkColorSetRGB(23, 23, 26);
++constexpr SkColor kSoraCompactPanelOutline =
++    SkColorSetARGB(0x26, 0xFF, 0xFF, 0xFF);  // 15%
++
+ }  // namespace
+ 
+ void AddSoraColorMixer(ui::ColorProvider* provider,
+@@ -103,22 +272,45 @@ void AddSoraColorMixer(ui::ColorProvider* provider,
+   essentials_defaults[kColorSoraEssentialTileSelectedCardHovered] = {
+       kColorTabBackgroundActiveFrameActive};
+ 
++  // Sora: the accent and compact panel colors, for the same cases. High
++  // contrast and forced colors use Chromium's primary and the frame.
++  ui::ColorMixer& sora_defaults = provider->AddMixer();
++  sora_defaults[kColorSoraAccent] = {ui::kColorSysPrimary};
++  sora_defaults[kColorSoraAccentButtonBackground] = {ui::kColorSysPrimary};
++  sora_defaults[kColorSoraCompactPanelBackground] = {ui::kColorFrameActive};
++  sora_defaults[kColorSoraCompactPanelOutline] = {SK_ColorTRANSPARENT};
++
+   // High contrast and forced colors keep the system palette.
+   if (key.contrast_mode == ui::ColorProviderKey::ContrastMode::kHigh ||
+       key.forced_colors != ui::ColorProviderKey::ForcedColors::kNone) {
+     return;
+   }
+ 
+-  const SoraPalette& p =
+-      key.color_mode == ui::ColorProviderKey::ColorMode::kDark ? kDark : kLight;
++  const bool dark = key.color_mode == ui::ColorProviderKey::ColorMode::kDark;
++  const SoraPalette& p = dark ? kDark : kLight;
+   const ui::ColorTransform background = p.main_background;
+-  // Zen tints the text with 12% of the accent and draws it at 90%.
++  // Sora: Zen's dominant color (see GetZenDominantColor()).
++  const ui::ColorTransform dominant = GetZenDominantColor(key, dark);
++  // Zen tints the text with 12% of the dominant color and draws it at 90%.
+   const ui::ColorTransform text = ui::AlphaBlend(
+-      ui::AlphaBlend({ui::kColorSysPrimary}, {p.text_base}, kTextAccentAlpha),
+-      background, kTextAlpha);
++      ui::AlphaBlend(dominant, {p.text_base}, kTextAccentAlpha), background,
++      kTextAlpha);
+ 
+   ui::ColorMixer& mixer = provider->AddMixer();
+ 
++  // Sora: --zen-primary-color and --zen-accent-button-background.
++  mixer[kColorSoraAccent] =
++      DeriveAccent(dominant, AccentStep::kPrimary, dark);
++  mixer[kColorSoraAccentButtonBackground] =
++      DeriveAccent({kColorSoraAccent}, AccentStep::kAccentButton, dark);
++
++  // Sora: the compact mode panel. An installed theme keeps its frame color.
++  mixer[kColorSoraCompactPanelBackground] =
++      key.custom_theme ? ui::ColorTransform(ui::kColorFrameActive)
++      : dark           ? ui::ColorTransform(kSoraCompactPanelDark)
++                       : ui::ColorTransform(kSoraCompactPanelLight);
++  mixer[kColorSoraCompactPanelOutline] = {kSoraCompactPanelOutline};
++
+   // Frame, toolbar and the vertical tab strip share one surface.
+   mixer[ui::kColorFrameActive] = background;
+   mixer[ui::kColorFrameInactive] = background;
+@@ -141,8 +333,9 @@ void AddSoraColorMixer(ui::ColorProvider* provider,
+   // Tabs: transparent at rest, a 7% veil on hover, a white card when active.
+   const ui::ColorTransform tab_hover =
+       ui::AlphaBlend({p.hover_veil}, background, kHoverAlpha);
++  // Sora: the tint is --zen-primary-color (zen-workspaces.css).
+   const ui::ColorTransform tab_active = ui::AlphaBlend(
+-      {ui::kColorSysPrimary},
++      {kColorSoraAccent},
+       ui::AlphaBlend({p.selected_veil}, background, p.selected_veil_alpha),
+       p.selected_accent_alpha);
+   for (const auto id : {kColorTabBackgroundInactiveFrameActive,
+diff --git a/chrome/browser/ui/views/frame/BUILD.gn b/chrome/browser/ui/views/frame/BUILD.gn
+index d1c3d94..ca84040 100644
+--- a/chrome/browser/ui/views/frame/BUILD.gn
++++ b/chrome/browser/ui/views/frame/BUILD.gn
+@@ -25,6 +25,9 @@ source_set("shadow") {
+     "//chrome/browser/ui/animation",
+     "//chrome/browser/ui/color:color_headers",
+     "//ui/decoration",
++
++    # Sora: gfx::ShadowValues for fixed shadows.
++    "//ui/gfx",
+     "//ui/gfx:color_utils",
+     "//ui/views",
+   ]
+diff --git a/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc b/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc
+index fb03ac6..76fe0b7 100644
+--- a/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc
++++ b/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc
+@@ -104,6 +104,18 @@ void SetSoraCompactPanelTopCorners(CustomCornersBackground::Corners& corners) {
+   }
+ }
+ 
++// Sora: Zen's compact panel outline, 1px just inside the panel's edge
++// (zen-compact-mode.css, `outline-offset: -1px`). CustomCornersBackground
++// strokes inside its bounds and follows the rounded corners between two
++// stroked sides.
++CustomCornersBackground::Outline GetSoraCompactPanelOutline(bool bottom) {
++  CustomCornersBackground::Outline outline;
++  outline.color = {.color = kColorSoraCompactPanelOutline, .opacity = 1.0f};
++  outline.top = outline.leading = outline.trailing = true;
++  outline.bottom = bottom;
++  return outline;
++}
++
+ // Increases the leading or trailing exclusion padding to `minimum`.
+ void IncreasePaddingToMinimum(BrowserLayoutParams& params, int minimum) {
+   // Default to increasing the trailing exclusion padding. On ChromeOS, the
+@@ -1721,6 +1733,14 @@ void BrowserViewTabbedLayoutImpl::ConfigureTopContainerBackground(
+   if (layout_data_->sora_sidebar_toolbar && layout_data_->sora_compact_mode) {
+     SetSoraCompactPanelTopCorners(corners);
+   }
++  // Sora: and the panel's surface and outline (the panel's own top edge is
++  // under the toolbar).
++  CustomCornersBackground::Outline outline;
++  if (layout_data_->sora_sidebar_toolbar && layout_data_->sora_compact_mode) {
++    background->SetPrimaryColor(kColorSoraCompactPanelBackground);
++    outline = GetSoraCompactPanelOutline(/*bottom=*/false);
++  }
++  background->SetOutline(outline);
+ 
+   background->SetCorners(corners);
+ }
+@@ -1836,6 +1856,14 @@ void BrowserViewTabbedLayoutImpl::DoPostLayoutVisualAdjustments(
+     } else {
+       vertical_tabs_background->SetPrimaryColor(frame_color);
+     }
++    // Sora: the compact mode panel has its own surface (sora/zen-spec.md,
++    // section 6), at the opacity worked out above.
++    if (layout_data_->sora_compact_mode) {
++      vertical_tabs_background->SetPrimaryColor(
++          CustomCorners::ColorChoiceWithAlpha(
++              kColorSoraCompactPanelBackground,
++              vertical_tabs_background->primary_color().opacity));
++    }
+ 
+     // Ensure that corners of the window remain rounded.
+     CustomCornersBackground::Corners vertical_tabs_corners;
+@@ -1939,10 +1967,9 @@ void BrowserViewTabbedLayoutImpl::DoPostLayoutVisualAdjustments(
+     if (animation.expand_on_hover_width > 0.0) {
+       vertical_tabs_outline.bottom = true;
+     }
+-    // Sora: the compact mode panel relies on its shadow alone.
++    // Sora: the compact mode panel gets Zen's outline instead.
+     if (layout_data_->sora_compact_mode) {
+-      vertical_tabs_outline.top = vertical_tabs_outline.leading =
+-          vertical_tabs_outline.bottom = vertical_tabs_outline.trailing = false;
++      vertical_tabs_outline = GetSoraCompactPanelOutline(/*bottom=*/true);
+     }
+     vertical_tabs_background->SetOutline(vertical_tabs_outline);
+ 
+@@ -2097,6 +2124,18 @@ void BrowserViewTabbedLayoutImpl::DoPostLayoutVisualAdjustments(
+   }
+   toolbar_background->SetCorners(toolbar_corners);
+ 
++  // Sora: on the compact mode panel the toolbar takes the panel's surface and
++  // outline, see ConfigureTopContainerBackground().
++  const bool sora_panel_toolbar =
++      layout_data_->sora_sidebar_toolbar && layout_data_->sora_compact_mode;
++  toolbar_background->SetPrimaryColor(
++      sora_panel_toolbar
++          ? CustomCorners::ColorChoice(kColorSoraCompactPanelBackground)
++          : CustomCorners::ColorChoice(CustomCornersBackground::ToolbarTheme()));
++  toolbar_background->SetOutline(
++      sora_panel_toolbar ? GetSoraCompactPanelOutline(/*bottom=*/false)
++                         : CustomCornersBackground::Outline());
++
+   auto* const top_container_background =
+       views().top_container->background()->AsA<CustomCornersBackground>();
+   CHECK(top_container_background)
+diff --git a/chrome/browser/ui/views/frame/shadow_frame_view.cc b/chrome/browser/ui/views/frame/shadow_frame_view.cc
+index 35cb7ab..ccd2bba 100644
+--- a/chrome/browser/ui/views/frame/shadow_frame_view.cc
++++ b/chrome/browser/ui/views/frame/shadow_frame_view.cc
+@@ -5,17 +5,120 @@
+ #include "chrome/browser/ui/views/frame/shadow_frame_view.h"
+ 
+ #include <memory>
++#include <optional>
++#include <utility>
+ 
++#include "base/memory/raw_ptr.h"
+ #include "base/numerics/safe_conversions.h"
++#include "base/scoped_observation.h"
+ #include "chrome/browser/ui/color/chrome_color_id.h"
+ #include "ui/base/metadata/metadata_impl_macros.h"
+ #include "ui/color/color_provider.h"
+ #include "ui/compositor/layer.h"
+ #include "ui/decoration/decoration.h"
++#include "ui/decoration/decoration_source.h"
++#include "ui/decoration/decoration_util.h"
+ #include "ui/decoration/shadow.h"
+ #include "ui/gfx/color_utils.h"
++#include "ui/gfx/geometry/rect.h"
+ #include "ui/gfx/geometry/rounded_corners_f.h"
+-#include "ui/views/view_shadow.h"
++#include "ui/views/view_observer.h"
++
++namespace {
++
++// Sora: draws a fixed set of shadow values around the content, the way
++// ui::decoration::Shadow draws an elevation's (minus its elevation cap).
++class FixedShadowSource : public ui::decoration::DecorationSource {
++ public:
++  DECLARE_SAFE_CAST_TARGET()
++
++  explicit FixedShadowSource(gfx::ShadowValues shadows)
++      : shadows_(std::move(shadows)) {}
++  FixedShadowSource(const FixedShadowSource&) = delete;
++  FixedShadowSource& operator=(const FixedShadowSource&) = delete;
++  ~FixedShadowSource() override = default;
++
++  // ui::decoration::DecorationSource:
++  std::optional<Details> GetDetails(
++      const gfx::Rect& content_bounds,
++      const gfx::RoundedCornersF& rounded_corners) override {
++    const ui::decoration::ShadowDetails& details =
++        ui::decoration::ShadowDetails::Get(rounded_corners, shadows_);
++    // The ninebox needs the content to be at least as big as its corners.
++    if (content_bounds.width() < details.aperture_insets.width() ||
++        content_bounds.height() < details.aperture_insets.height()) {
++      return std::nullopt;
++    }
++    gfx::Rect occlusion_rect(content_bounds.size());
++    occlusion_rect.Inset(
++        ui::decoration::GetInsetsForRoundedCorners(rounded_corners));
++    return Details{
++        .appearance =
++            {
++                .nine_patch_image = details.nine_patch_image,
++                .aperture_insets = details.aperture_insets,
++                .margins = details.margins,
++            },
++        .occlusion_rect = occlusion_rect,
++    };
++  }
++
++ private:
++  const gfx::ShadowValues shadows_;
++};
++
++DEFINE_SAFE_CAST_TARGET(FixedShadowSource)
++
++}  // namespace
++
++// Sora: same as views::ViewShadow (puts `decoration` below the view's layer
++// and keeps it framing the view), but for any decoration, so that a fixed
++// shadow can be drawn as well as an elevation.
++class ShadowFrameView::DecorationShadow : public views::ViewObserver {
++ public:
++  DecorationShadow(views::View* view,
++                   std::unique_ptr<ui::Decoration> decoration)
++      : view_(view), decoration_(std::move(decoration)) {
++    if (!view_->layer()) {
++      view_->SetPaintToLayer();
++    }
++    view_->AddLayerToRegion(decoration_->layer(), views::LayerRegion::kBelow);
++    decoration_->SetContentBounds(view_->layer()->bounds());
++    view_observation_.Observe(view_);
++  }
++  DecorationShadow(const DecorationShadow&) = delete;
++  DecorationShadow& operator=(const DecorationShadow&) = delete;
++  ~DecorationShadow() override {
++    if (view_) {
++      OnViewIsDeleting(view_);
++    }
++  }
++
++  ui::Decoration* decoration() { return decoration_.get(); }
++
++  void SetRoundedCornerRadius(int corner_radius) {
++    SetRoundedCorners(gfx::RoundedCornersF(corner_radius));
++  }
++  void SetRoundedCorners(const gfx::RoundedCornersF& radii) {
++    decoration_->SetRoundedCorners(radii);
++  }
++
++ private:
++  // views::ViewObserver:
++  void OnViewLayerBoundsSet(views::View* view) override {
++    decoration_->SetContentBounds(view_->layer()->bounds());
++  }
++  void OnViewIsDeleting(views::View* view) override {
++    decoration_.reset();
++    view_observation_.Reset();
++    view_ = nullptr;
++  }
++
++  raw_ptr<views::View> view_;
++  std::unique_ptr<ui::Decoration> decoration_;
++  base::ScopedObservation<views::View, views::ViewObserver> view_observation_{
++      this};
++};
+ 
+ BEGIN_METADATA(ShadowFrameView)
+ END_METADATA
+@@ -25,6 +128,11 @@ ShadowFrameView::ShadowFrameView(int elevation, ShadowAlpha alpha)
+   SetCanProcessEventsWithinSubtree(false);
+ }
+ 
++ShadowFrameView::ShadowFrameView(gfx::ShadowValues shadows)
++    : shadow_alpha_(), fixed_shadows_(std::move(shadows)) {
++  SetCanProcessEventsWithinSubtree(false);
++}
++
+ ShadowFrameView::~ShadowFrameView() = default;
+ 
+ void ShadowFrameView::SetShadowVisible(bool visible) {
+@@ -34,7 +142,13 @@ void ShadowFrameView::SetShadowVisible(bool visible) {
+   }
+ 
+   if (visible) {
+-    view_shadow_ = std::make_unique<views::ViewShadow>(this, shadow_elevation_);
++    // Sora: a fixed shadow has its own source; see DecorationShadow.
++    view_shadow_ = std::make_unique<DecorationShadow>(
++        this, fixed_shadows_
++                  ? ui::Decoration::Create(
++                        std::make_unique<FixedShadowSource>(*fixed_shadows_),
++                        /*debug_name=*/"Shadow")
++                  : ui::Decoration::CreateShadow(shadow_elevation_));
+     view_shadow_->SetRoundedCorners(corners_);
+     view_shadow_->decoration()->layer()->SetOpacity(shadow_opacity_);
+     UpdateShadowColors();
+@@ -100,7 +214,8 @@ void ShadowFrameView::AddedToWidget() {
+ 
+ void ShadowFrameView::UpdateShadowColors() {
+   CHECK(view_shadow_);
+-  if (!view_shadow_->decoration()) {
++  // Sora: a fixed shadow carries its own colors.
++  if (!view_shadow_->decoration() || fixed_shadows_) {
+     return;
+   }
+ 
+diff --git a/chrome/browser/ui/views/frame/shadow_frame_view.h b/chrome/browser/ui/views/frame/shadow_frame_view.h
+index 273aca1..88b5df9 100644
+--- a/chrome/browser/ui/views/frame/shadow_frame_view.h
++++ b/chrome/browser/ui/views/frame/shadow_frame_view.h
+@@ -9,12 +9,9 @@
+ #include <optional>
+ 
+ #include "ui/gfx/geometry/rounded_corners_f.h"
++#include "ui/gfx/shadow_value.h"
+ #include "ui/views/view.h"
+ 
+-namespace views {
+-class ViewShadow;
+-}
+-
+ // Non-interactive child view that can be used to add a TopChrome-specific
+ // shadow to an elevated element. This view should be laid out in whatever
+ // bounds you want the shadow box to be around.
+@@ -32,6 +29,9 @@ class ShadowFrameView : public views::View {
+   };
+ 
+   ShadowFrameView(int elevation, ShadowAlpha alpha);
++  // Sora: casts exactly `shadows` in every color mode instead of a Material
++  // elevation, so that a CSS box-shadow can be matched.
++  explicit ShadowFrameView(gfx::ShadowValues shadows);
+   ~ShadowFrameView() override;
+ 
+   // Sets the shadow to be visible.
+@@ -53,10 +53,15 @@ class ShadowFrameView : public views::View {
+   void AddedToWidget() override;
+ 
+  private:
++  // Sora: views::ViewShadow for any decoration, see the .cc file.
++  class DecorationShadow;
++
+   void UpdateShadowColors();
+ 
+-  const int shadow_elevation_;
++  const int shadow_elevation_ = 0;
+   const ShadowAlpha shadow_alpha_;
++  // Sora: when set, the shadow is these values instead of the elevation.
++  const std::optional<gfx::ShadowValues> fixed_shadows_ = std::nullopt;
+ 
+   // This default configuration is designed to have broadly-acceptable values,
+   // but should be changed to specific values when shipping a feature using this
+@@ -65,7 +70,7 @@ class ShadowFrameView : public views::View {
+   double shadow_opacity_ = 1.0;
+   std::optional<bool> was_dark_;
+ 
+-  std::unique_ptr<views::ViewShadow> view_shadow_;
++  std::unique_ptr<DecorationShadow> view_shadow_;
+ };
+ 
+ #endif  // CHROME_BROWSER_UI_VIEWS_FRAME_SHADOW_FRAME_VIEW_H_
+diff --git a/chrome/browser/ui/views/frame/shadow_overlay_view.cc b/chrome/browser/ui/views/frame/shadow_overlay_view.cc
+index 2a23cc3..ec7ed58 100644
+--- a/chrome/browser/ui/views/frame/shadow_overlay_view.cc
++++ b/chrome/browser/ui/views/frame/shadow_overlay_view.cc
+@@ -17,15 +17,31 @@
+ #include "chrome/browser/ui/views/frame/shadow_frame_view.h"
+ #include "chrome/browser/ui/views/frame/themed_background.h"
+ #include "chrome/browser/ui/views/side_panel/side_panel.h"
++#include "third_party/skia/include/core/SkColor.h"
+ #include "third_party/skia/include/core/SkPath.h"
+ #include "third_party/skia/include/core/SkPathBuilder.h"
+ #include "ui/base/metadata/metadata_impl_macros.h"
+ #include "ui/compositor/layer.h"
++#include "ui/gfx/geometry/vector2d.h"
++#include "ui/gfx/shadow_value.h"
+ #include "ui/views/layout/delegating_layout_manager.h"
+ #include "ui/views/layout/layout_provider.h"
+ #include "ui/views/layout/proposed_layout.h"
+ #include "ui/views/view.h"
+ 
++namespace {
++
++// Sora: Zen's card shadow, `rgba(0, 0, 0, .24) 0 3px 8px`. A CSS blur radius
++// B is a Gaussian with sigma B/2; gfx::ShadowValue blurs with
++// sigma = 0.288675 * blur / 2 + 0.5, so 8px of CSS blur is a blur of 24 here
++// (sigma 3.96).
++constexpr int kSoraCardShadowOffsetY = 3;
++constexpr double kSoraCardShadowBlur = 24;
++constexpr SkColor kSoraCardShadowColor =
++    SkColorSetARGB(0x3D, 0x00, 0x00, 0x00);  // 24%
++
++}  // namespace
++
+ // Implements the opaque corners that overlay the main area of the browser and
+ // sync with the shadow box.
+ class ShadowOverlayView::CornerView : public views::View {
+@@ -163,26 +179,13 @@ ShadowOverlayView::ShadowOverlayView(BrowserView& browser_view)
+   bottom_trailing_corner_ = AddChildView(std::make_unique<CornerView>(
+       CornerView::Corner::kBottomTrailing, browser_view));
+ 
+-  // These are the UX targets:
+-  // light: 0 0 4px 0 rgba(0, 0, 0, 0.10),
+-  //        0 2px 6px 0 rgba(0, 0, 0, 0.17)
+-  // dark:  0 0 4px 0 rgba(0, 0, 0, 0.20),
+-  //        0 2px 6px 0 rgba(0, 0, 0, 0.40)
+-  //
+-  // These are the defaults for the MD shadow at 4 height. The directionality of
+-  // the shadow cannot be changed, only the color.
+-  // box-shadow: 0 0 4px rgba(0, 0, 0, .12),
+-  //             0 4px 8px rgba(0, 0, 0, .24)
+-  //
+-  // This is an attempt to approximate the target values with only color.
+-  static constexpr ShadowFrameView::ShadowAlpha kShadowAlpha{
+-      .light_key = 0.10,
+-      .light_ambient = 0.17,
+-      .dark_key = 0.20,
+-      .dark_ambient = 0.40};
+-
+-  shadow_box_ =
+-      AddChildView(std::make_unique<ShadowFrameView>(4, kShadowAlpha));
++  // Sora: Zen's content card shadow, `rgba(0, 0, 0, .24) 0 3px 8px` in both
++  // color modes (sora/zen-spec.md, section 2), instead of Chromium's Material
++  // elevation, which can't move its key shadow down by only 3px.
++  shadow_box_ = AddChildView(std::make_unique<ShadowFrameView>(
++      gfx::ShadowValues{gfx::ShadowValue(
++          gfx::Vector2d(0, kSoraCardShadowOffsetY), kSoraCardShadowBlur,
++          kSoraCardShadowColor)}));
+ 
+   SetLayoutManager(std::make_unique<views::DelegatingLayoutManager>(this));
+ 

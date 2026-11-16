@@ -1,0 +1,516 @@
+diff --git a/chrome/browser/ui/color/chrome_color_id.h b/chrome/browser/ui/color/chrome_color_id.h
+index c79d949..aec4669 100644
+--- a/chrome/browser/ui/color/chrome_color_id.h
++++ b/chrome/browser/ui/color/chrome_color_id.h
+@@ -1158,6 +1158,10 @@
+   /* Vertical tabstrip colors. */ \
+   E_CPONLY(kColorVerticalTabStripShadow) \
+   E_CPONLY(kColorVerticalTabPinnedOutline) \
++  /* Sora: Zen Essentials tiles (pinned vertical tabs). */ \
++  E_CPONLY(kColorSoraEssentialTileHover) \
++  E_CPONLY(kColorSoraEssentialTileSelectedCard) \
++  E_CPONLY(kColorSoraEssentialTileSelectedCardHovered) \
+   /* WebAuthn colors. */ \
+   E_CPONLY(kColorWebAuthnHoverButtonForeground) \
+   E_CPONLY(kColorWebAuthnHoverButtonForegroundDisabled) \
+diff --git a/chrome/browser/ui/color/sora_color_mixer.cc b/chrome/browser/ui/color/sora_color_mixer.cc
+index 9e80aa4..f2e8562 100644
+--- a/chrome/browser/ui/color/sora_color_mixer.cc
++++ b/chrome/browser/ui/color/sora_color_mixer.cc
+@@ -59,10 +59,46 @@ constexpr SkAlpha kHoverAlpha = 0x12;       // 7% hover veil
+ constexpr SkAlpha kPressedAlpha = 0x1A;     // 10% pressed or open veil
+ constexpr SkAlpha kIconAlpha = 0xB3;        // toolbar icons at 70%
+ 
++// Sora: Zen Essentials tiles (sora/zen-spec.md, section 3). Hover is black at
++// 10% (light) or the essentials selected white at 20% (dark) over the frame;
++// the selected tile's card is translucent so its blurred favicon shows
++// through, and lighter on hover.
++struct SoraEssentialsPalette {
++  SkColor hover_veil;
++  SkAlpha hover_alpha;
++  SkColor selected_card;
++  SkColor selected_card_hovered;
++};
++
++constexpr SoraEssentialsPalette kEssentialsLight{
++    .hover_veil = SK_ColorBLACK,
++    .hover_alpha = 0x1A,                                         // 10%
++    .selected_card = SkColorSetARGB(0xD9, 0xFF, 0xFF, 0xFF),        // 85%
++    .selected_card_hovered = SkColorSetARGB(0xCC, 0xFF, 0xFF, 0xFF),  // 80%
++};
++
++constexpr SoraEssentialsPalette kEssentialsDark{
++    .hover_veil = SK_ColorWHITE,
++    .hover_alpha = 0x33,                                         // 20%
++    .selected_card = SkColorSetARGB(0xD9, 0x44, 0x40, 0x40),        // 85%
++    .selected_card_hovered = SkColorSetARGB(0xBF, 0x44, 0x40, 0x40),  // 75%
++};
++
+ }  // namespace
+ 
+ void AddSoraColorMixer(ui::ColorProvider* provider,
+                        const ui::ColorProviderKey& key) {
++  // Sora: the Essentials tile colors need a recipe in every mode. High
++  // contrast, forced colors and the cases below that don't override them use
++  // the tab colors.
++  ui::ColorMixer& essentials_defaults = provider->AddMixer();
++  essentials_defaults[kColorSoraEssentialTileHover] = {
++      kColorTabBackgroundInactiveHoverFrameActive};
++  essentials_defaults[kColorSoraEssentialTileSelectedCard] = {
++      kColorTabBackgroundActiveFrameActive};
++  essentials_defaults[kColorSoraEssentialTileSelectedCardHovered] = {
++      kColorTabBackgroundActiveFrameActive};
++
+   // High contrast and forced colors keep the system palette.
+   if (key.contrast_mode == ui::ColorProviderKey::ContrastMode::kHigh ||
+       key.forced_colors != ui::ColorProviderKey::ForcedColors::kNone) {
+@@ -135,4 +171,16 @@ void AddSoraColorMixer(ui::ColorProvider* provider,
+       ui::AlphaBlend(text, background, p.element_alpha);
+   mixer[kColorToolbarBackgroundSubtleEmphasisHovered] =
+       ui::AlphaBlend({p.element_hover}, background, p.element_hover_alpha);
++
++  // Sora: Essentials tiles rest on kColorToolbarBackgroundSubtleEmphasis (Zen's
++  // --zen-toolbar-element-bg) and use these for hover and selection.
++  const SoraEssentialsPalette& essentials =
++      key.color_mode == ui::ColorProviderKey::ColorMode::kDark
++          ? kEssentialsDark
++          : kEssentialsLight;
++  mixer[kColorSoraEssentialTileHover] = ui::AlphaBlend(
++      {essentials.hover_veil}, background, essentials.hover_alpha);
++  mixer[kColorSoraEssentialTileSelectedCard] = {essentials.selected_card};
++  mixer[kColorSoraEssentialTileSelectedCardHovered] = {
++      essentials.selected_card_hovered};
+ }
+diff --git a/chrome/browser/ui/views/tabs/common/pinned_tab_container_view.cc b/chrome/browser/ui/views/tabs/common/pinned_tab_container_view.cc
+index 37023b7..133870a 100644
+--- a/chrome/browser/ui/views/tabs/common/pinned_tab_container_view.cc
++++ b/chrome/browser/ui/views/tabs/common/pinned_tab_container_view.cc
+@@ -4,7 +4,10 @@
+ 
+ #include "chrome/browser/ui/views/tabs/common/pinned_tab_container_view.h"
+ 
++#include <algorithm>
++
+ #include "base/i18n/rtl.h"
++#include "base/numerics/safe_conversions.h"
+ #include "chrome/browser/ui/layout_constants.h"
+ #include "chrome/browser/ui/tabs/tab_style.h"
+ #include "chrome/browser/ui/views/tabs/common/dragged_tabs_container.h"
+@@ -27,8 +30,67 @@
+ 
+ namespace {
+ constexpr int kTabPadding = 4;
++
++// Sora: Zen's Essentials grid (sora/zen-spec.md, section 3). Expanded, pinned
++// tabs are 46px tiles, at least 50px wide (the tile height plus 4px), placed
++// 5px from the strip edges with the 4px gap above.
++constexpr int kEssentialsTileHeight = 46;
++constexpr int kEssentialsMinTileWidth = 50;
++constexpr int kEssentialsHorizontalInset = 5;
++// Zen uses `minmax(48px, ...)` for the five-tile variant below.
++constexpr int kEssentialsFiveTilesMinTileWidth = 48;
++
++// One column of Zen's `repeat(auto-fit, minmax(max(<share>, <min>), 1fr))`.
++// `column_multiple` is 2 when Zen repeats the track in pairs.
++struct EssentialsColumnTrack {
++  float share;
++  int min_width;
++  int column_multiple;
++};
++
++// Zen swaps the column track by tile count so rows stay balanced
++// (ZenSpaceManager's "data-hack-type"): 6 or 9 tiles go in threes, 2 or 4 in
++// pairs, 5 in threes with a 25% share, anything else at 23.7%.
++EssentialsColumnTrack GetEssentialsColumnTrack(int count) {
++  if (count == 6 || count == 9) {
++    return {0.30f, kEssentialsMinTileWidth, 1};
++  }
++  if (count % 2 == 0 && count < 8) {
++    return {0.23f, kEssentialsMinTileWidth, 2};
++  }
++  if (count == 5) {
++    return {0.25f, kEssentialsFiveTilesMinTileWidth, 1};
++  }
++  return {0.237f, kEssentialsMinTileWidth, 1};
++}
++
++// Number of columns the auto-fit grid shows for `count` tiles in `width`.
++// Empty auto-fit tracks collapse, so a short row stretches over the width.
++int GetEssentialsColumnCount(int width, int count) {
++  const EssentialsColumnTrack track = GetEssentialsColumnTrack(count);
++  const int min_width =
++      std::max(base::ClampCeil(width * track.share), track.min_width);
++  int columns = (width + kTabPadding) / (min_width + kTabPadding);
++  columns -= columns % track.column_multiple;
++  return std::clamp(columns, 1, std::max(count, 1));
++}
++
++// Expanded, pinned tabs are Essentials tiles; collapsed, they keep the height
++// of the other tabs.
++int GetPinnedTileHeight(tabs::VerticalTabStripCollapseState state) {
++  return state == tabs::VerticalTabStripCollapseState::kExpanded
++             ? kEssentialsTileHeight
++             : GetLayoutConstant(LayoutConstant::kVerticalTabPinnedHeight);
++}
+ }  // namespace
+ 
++// static
++int PinnedTabContainerView::GetVerticalStripHorizontalInset(bool expanded) {
++  return expanded ? kEssentialsHorizontalInset
++                  : GetLayoutConstant(
++                        LayoutConstant::kVerticalTabStripHorizontalPadding);
++}
++
+ PinnedTabContainerView::PinnedTabContainerView(
+     TabCollectionNode* collection_node)
+     : DraggedTabsContainer(
+@@ -121,9 +183,9 @@ gfx::Size PinnedTabContainerView::GetMinimumSize() const {
+       (collapse_state != tabs::VerticalTabStripCollapseState::kExpanded ? 1.5f
+                                                                         : 1.0f),
+       static_cast<float>(num_children));
++  // Sora: rows are as tall as the pinned tiles.
+   const int min_height =
+-      base::ClampCeil(GetLayoutConstant(LayoutConstant::kVerticalTabHeight) *
+-                      min_rows) +
++      base::ClampCeil(GetPinnedTileHeight(collapse_state) * min_rows) +
+       (num_children > 1 ? kTabPadding : 0);
+   return gfx::Size(GetLayoutConstant(LayoutConstant::kVerticalTabMinWidth),
+                    min_height);
+@@ -399,25 +461,32 @@ views::ProposedLayout PinnedTabContainerView::CalculateVerticalLayout(
+   // If the width is bounded, calculate how many children can fit on a row.
+   // Since all children are allocated the same width this will be the same for
+   // every row.
++  const auto collapse_state = GetTabStripCollapseState();
+   if (size_bounds.width().is_bounded() && size_bounds.width().value() > 0) {
+-    auto collapse_state = GetTabStripCollapseState();
+-
+     // Apply horizontal padding immediately at start of collapse animation by
+     // including collapsing state.
++    // Sora: the left inset comes from TabStripViewLayout; this is the right
++    // one, which matches it.
+     int available_width =
+         size_bounds.width().value() -
+-        GetLayoutConstant(LayoutConstant::kVerticalTabStripHorizontalPadding);
++        GetVerticalStripHorizontalInset(
++            collapse_state == tabs::VerticalTabStripCollapseState::kExpanded);
+ 
+     // When we are in collapsed state, only one child should be shown per row.
+     // During collapse animation and other cases, fit as many as possible.
+-    children_on_row =
+-        collapse_state == tabs::VerticalTabStripCollapseState::kCollapsed
+-            ? 1
+-            : std::min(
+-                  children_on_row,
+-                  static_cast<int>(std::floor((available_width - child_width) /
+-                                              (child_width + kTabPadding)) +
+-                                   1));
++    // Sora: without split tabs, the columns follow Zen's Essentials grid.
++    if (collapse_state == tabs::VerticalTabStripCollapseState::kCollapsed) {
++      children_on_row = 1;
++    } else if (contains_split) {
++      children_on_row = std::min(
++          children_on_row,
++          static_cast<int>(std::floor((available_width - child_width) /
++                                      (child_width + kTabPadding)) +
++                           1));
++    } else {
++      children_on_row =
++          GetEssentialsColumnCount(available_width, children_on_row);
++    }
+ 
+     // Allocate extra space to the tabs.
+     available_width -=
+@@ -430,6 +499,11 @@ views::ProposedLayout PinnedTabContainerView::CalculateVerticalLayout(
+     gfx::Rect bounds =
+         gfx::Rect(child->GetPreferredSize(views::SizeBounds(child_width, {})));
+     bounds.set_width(child_width);
++    // Sora: single pinned tabs are tiles of a fixed height; the tab lays its
++    // favicon out in the height it gets.
++    if (views::IsViewClass<TabView>(child)) {
++      bounds.set_height(GetPinnedTileHeight(collapse_state));
++    }
+ 
+     auto drag_data = GetVisualDataForDraggedView(*child);
+     const bool should_show_child = !(drag_data && drag_data->should_hide);
+diff --git a/chrome/browser/ui/views/tabs/common/pinned_tab_container_view.h b/chrome/browser/ui/views/tabs/common/pinned_tab_container_view.h
+index 60e3195..1de5fc2 100644
+--- a/chrome/browser/ui/views/tabs/common/pinned_tab_container_view.h
++++ b/chrome/browser/ui/views/tabs/common/pinned_tab_container_view.h
+@@ -50,6 +50,11 @@ class PinnedTabContainerView
+   std::optional<BrowserRootView::DropIndex> GetLinkDropIndex(
+       const gfx::Point& loc_in_container);
+ 
++  // Sora: horizontal inset of the pinned grid from each edge of the vertical
++  // tab strip. Expanded, it is the 5px of Zen's Essentials grid; otherwise the
++  // tiles line up with the regular tabs.
++  static int GetVerticalStripHorizontalInset(bool expanded);
++
+  private:
+   // DraggedTabsContainer:
+   views::ScrollView* GetScrollViewForContainer() const override;
+diff --git a/chrome/browser/ui/views/tabs/common/tab_strip_view_layout.cc b/chrome/browser/ui/views/tabs/common/tab_strip_view_layout.cc
+index d588f43..cb81747 100644
+--- a/chrome/browser/ui/views/tabs/common/tab_strip_view_layout.cc
++++ b/chrome/browser/ui/views/tabs/common/tab_strip_view_layout.cc
+@@ -245,9 +245,14 @@ views::ProposedLayout TabStripViewLayout::CalculateVerticalLayout(
+ 
+   int y = 0;
+ 
++  // Sora: expanded, the pinned grid (Zen's Essentials) sits closer to the
++  // strip edges than the tabs.
++  const int pinned_horizontal_inset =
++      PinnedTabContainerView::GetVerticalStripHorizontalInset(!is_collapsed);
++
+   // Determine container preferred heights.
+   views::SizeBounds pinned_tab_container_size_bounds =
+-      size_bounds.Inset(gfx::Insets::TLBR(0, region_horizontal_padding, 0, 0));
++      size_bounds.Inset(gfx::Insets::TLBR(0, pinned_horizontal_inset, 0, 0));
+   const int pinned_preferred_height =
+       pinned_tabs_scroll_view
+           ->GetPreferredSize(pinned_tab_container_size_bounds)
+@@ -289,7 +294,7 @@ views::ProposedLayout TabStripViewLayout::CalculateVerticalLayout(
+     remaining_height -= pinned_container_height;
+   }
+   gfx::Rect pinned_container_bounds(
+-      region_horizontal_padding, y,
++      pinned_horizontal_inset, y,
+       pinned_tab_container_size_bounds.width().value(),
+       pinned_container_height);
+   layouts.child_layouts.emplace_back(pinned_tabs_scroll_view,
+diff --git a/chrome/browser/ui/views/tabs/common/tab_view.cc b/chrome/browser/ui/views/tabs/common/tab_view.cc
+index ff19096..bd585d4 100644
+--- a/chrome/browser/ui/views/tabs/common/tab_view.cc
++++ b/chrome/browser/ui/views/tabs/common/tab_view.cc
+@@ -4,6 +4,7 @@
+ 
+ #include "chrome/browser/ui/views/tabs/common/tab_view.h"
+ 
++#include <algorithm>
+ #include <optional>
+ #include <string>
+ 
+@@ -12,11 +13,14 @@
+ #include "base/metrics/user_metrics.h"
+ #include "base/metrics/user_metrics_action.h"
+ #include "base/time/time.h"
++#include "cc/paint/paint_filter.h"
++#include "cc/paint/paint_flags.h"
+ #include "chrome/browser/dictation/dictation_keyed_service.h"
+ #include "chrome/browser/glic/browser_ui/tab_underline_controller.h"
+ #include "chrome/browser/glic/browser_ui/tab_underline_view.h"
+ #include "chrome/browser/glic/public/glic_enabling.h"
+ #include "chrome/browser/themes/theme_properties.h"
++#include "chrome/browser/ui/color/chrome_color_id.h"
+ #include "chrome/browser/ui/browser_element_identifiers.h"
+ #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+ #include "chrome/browser/ui/layout_constants.h"
+@@ -68,23 +72,31 @@
+ #include "third_party/skia/include/core/SkPath.h"
+ #include "third_party/skia/include/core/SkPathBuilder.h"
+ #include "third_party/skia/include/core/SkRRect.h"
++#include "third_party/skia/include/core/SkRefCnt.h"
++#include "third_party/skia/include/core/SkTileMode.h"
+ #include "ui/accessibility/ax_enums.mojom-shared.h"
+ #include "ui/base/l10n/l10n_util.h"
+ #include "ui/base/metadata/metadata_impl_macros.h"
++#include "ui/base/models/image_model.h"
+ #include "ui/base/models/list_selection_model.h"
+ #include "ui/base/theme_provider.h"
+ #include "ui/base/ui_base_features.h"
+ #include "ui/compositor/clip_recorder.h"
+ #include "ui/compositor/compositor.h"
++#include "ui/color/color_provider.h"
+ #include "ui/compositor/layer.h"
+ #include "ui/events/keycodes/keyboard_codes.h"
+ #include "ui/events/types/event_type.h"
++#include "ui/gfx/color_utils.h"
+ #include "ui/gfx/font_list.h"
+ #include "ui/gfx/geometry/insets.h"
+ #include "ui/gfx/geometry/rect.h"
++#include "ui/gfx/geometry/rect_f.h"
+ #include "ui/gfx/geometry/rounded_corners_f.h"
+ #include "ui/gfx/geometry/size.h"
+ #include "ui/gfx/geometry/skia_conversions.h"
++#include "ui/gfx/image/image_skia.h"
++#include "ui/gfx/scoped_canvas.h"
+ #include "ui/views/accessibility/view_accessibility.h"
+ #include "ui/views/background.h"
+ #include "ui/views/border.h"
+@@ -102,6 +114,15 @@
+ namespace {
+ constexpr int kFocusRingInset = 0.0f;
+ 
++// Sora: the selected Essentials tile (sora/zen-spec.md, section 3). Its
++// favicon fills a box twice the tile's size (`inset: -50%`, scaled to fit),
++// blurred by 20px, under a translucent card inset by 2px. The card's 12px
++// squircle is about 5px round.
++constexpr int kEssentialsFaviconBackdropScale = 2;
++constexpr float kEssentialsFaviconBlurSigma = 20.0f;
++constexpr float kEssentialsSelectedCardInset = 2.0f;
++constexpr float kEssentialsSelectedCardRadius = 5.0f;
++
+ class TabHighlightPathGenerator : public views::HighlightPathGenerator {
+  public:
+   explicit TabHighlightPathGenerator(TabView* tab_view) : tab_view_(tab_view) {}
+@@ -844,6 +865,12 @@ void TabView::OnPaint(gfx::Canvas* canvas) {
+     return;
+   }
+ 
++  if (IsEssentialsTile()) {
++    PaintEssentialsTile(canvas);
++    views::View::OnPaint(canvas);
++    return;
++  }
++
+   tab_styling()->PaintTab(canvas);
+ 
+   views::View::OnPaint(canvas);
+@@ -1203,6 +1230,11 @@ void TabView::UpdateTabData(const tabs::TabData& data) {
+   UpdateTitle(tab_data_.title, tab_data_.should_render_loading_title);
+   alert_indicator_->TransitionToAlertState(tab_data_.alert_state);
+   SetHoverCardDataFrom(tab_data_);
++
++  // Sora: the selected Essentials tile paints its favicon in the background.
++  if (IsEssentialsTile()) {
++    SchedulePaint();
++  }
+ }
+ 
+ void TabView::SetDataForTesting(const tabs::TabData& data) {
+@@ -1227,23 +1259,84 @@ void TabView::UpdateBorder() {
+     return;
+   }
+ 
+-  if (pinned_) {
+-    if (split_) {
+-      // Insets for border handled by the `SplitTabView`.
+-      SetBorder(views::CreateEmptyBorder(gfx::Insets(GetLayoutConstant(
+-          LayoutConstant::kVerticalTabPinnedBorderThickness))));
+-    } else {
+-      SetBorder(views::CreateRoundedRectBorder(
+-          GetLayoutConstant(LayoutConstant::kVerticalTabPinnedBorderThickness),
+-          GetLayoutConstant(LayoutConstant::kVerticalTabCornerRadius),
+-          IsFrameActive() ? kColorVerticalTabPinnedOutline
+-                          : kColorTabDividerFrameInactive));
+-    }
++  // Sora: Zen's Essentials tiles have no outline, so single pinned tabs drop
++  // the pinned border.
++  if (pinned_ && split_) {
++    // Insets for border handled by the `SplitTabView`.
++    SetBorder(views::CreateEmptyBorder(gfx::Insets(GetLayoutConstant(
++        LayoutConstant::kVerticalTabPinnedBorderThickness))));
+   } else if (GetBorder()) {
+     SetBorder(nullptr);
+   }
+ }
+ 
++bool TabView::IsEssentialsTile() const {
++  return orientation_ == TabStripOrientation::kVertical && pinned_ && !split_;
++}
++
++void TabView::PaintEssentialsTile(gfx::Canvas* canvas) {
++  const ui::ColorProvider* const color_provider = GetColorProvider();
++  if (!color_provider) {
++    return;
++  }
++
++  const gfx::Rect tile_bounds = GetLocalBounds();
++  const float hover_value =
++      IsHoverAnimationActive() ? static_cast<float>(GetHoverAnimationValue())
++                               : 0.0f;
++
++  gfx::ScopedCanvas scoped_canvas(canvas);
++  canvas->ClipPath(GetPath(), /*do_anti_alias=*/true);
++
++  cc::PaintFlags flags;
++  flags.setAntiAlias(true);
++
++  if (!active_) {
++    // Unselected: the toolbar element background, moving to the hover color.
++    flags.setColor(color_utils::AlphaBlend(
++        color_provider->GetColor(kColorSoraEssentialTileHover),
++        color_provider->GetColor(kColorToolbarBackgroundSubtleEmphasis),
++        hover_value));
++    canvas->DrawRect(tile_bounds, flags);
++    if (selected_) {
++      // Multi-selected tiles take the selected card over the whole tile.
++      flags.setColor(
++          color_provider->GetColor(kColorSoraEssentialTileSelectedCard));
++      canvas->DrawRect(tile_bounds, flags);
++    }
++    return;
++  }
++
++  // Selected: the favicon, blurred, as the tile background.
++  if (tab_data_.should_display_favicon && !tab_data_.favicon.IsEmpty()) {
++    const gfx::ImageSkia favicon =
++        tab_data_.favicon.Rasterize(color_provider);
++    if (!favicon.isNull() && favicon.width() > 0 && favicon.height() > 0) {
++      const int side = std::min(tile_bounds.width(), tile_bounds.height()) *
++                       kEssentialsFaviconBackdropScale;
++      const gfx::Point center = tile_bounds.CenterPoint();
++      cc::PaintFlags blur_flags;
++      blur_flags.setImageFilter(sk_make_sp<cc::BlurPaintFilter>(
++          kEssentialsFaviconBlurSigma, kEssentialsFaviconBlurSigma,
++          SkTileMode::kDecal, /*input=*/nullptr));
++      canvas->SaveLayerWithFlags(blur_flags);
++      canvas->DrawImageInt(favicon, 0, 0, favicon.width(), favicon.height(),
++                           center.x() - side / 2, center.y() - side / 2, side,
++                           side, /*filter=*/true);
++      canvas->Restore();
++    }
++  }
++
++  // The translucent card over it, lighter on hover.
++  gfx::RectF card_bounds(tile_bounds);
++  card_bounds.Inset(kEssentialsSelectedCardInset);
++  flags.setColor(color_utils::AlphaBlend(
++      color_provider->GetColor(kColorSoraEssentialTileSelectedCardHovered),
++      color_provider->GetColor(kColorSoraEssentialTileSelectedCard),
++      hover_value));
++  canvas->DrawRoundRect(card_bounds, kEssentialsSelectedCardRadius, flags);
++}
++
+ void TabView::UpdateColors() {
+   UpdateContrastRatioValues();
+   if (auto* theme_provider = GetThemeProvider()) {
+diff --git a/chrome/browser/ui/views/tabs/common/tab_view.h b/chrome/browser/ui/views/tabs/common/tab_view.h
+index 7044303..9090ebf 100644
+--- a/chrome/browser/ui/views/tabs/common/tab_view.h
++++ b/chrome/browser/ui/views/tabs/common/tab_view.h
+@@ -183,6 +183,10 @@ class TabView : public views::View,
+ 
+   void UpdateTitle(std::u16string title, bool should_render_loading_title);
+   void UpdateBorder();
++
++  // Sora: pinned vertical tabs are painted as Zen's Essentials tiles.
++  bool IsEssentialsTile() const;
++  void PaintEssentialsTile(gfx::Canvas* canvas);
+   void UpdateColors();
+   void UpdateContrastRatioValues();
+ 
+diff --git a/chrome/browser/ui/views/tabs/common/tab_view_vertical_layout.cc b/chrome/browser/ui/views/tabs/common/tab_view_vertical_layout.cc
+index 9747f25..11b97f1 100644
+--- a/chrome/browser/ui/views/tabs/common/tab_view_vertical_layout.cc
++++ b/chrome/browser/ui/views/tabs/common/tab_view_vertical_layout.cc
+@@ -50,9 +50,17 @@ views::ProposedLayout TabViewVerticalLayout::CalculateProposedLayout(
+     const views::SizeBounds& size_bounds) const {
+   const int width =
+       size_bounds.width().value_or(tabs::kVerticalTabStripUncollapsedMaxWidth);
+-  const int height = GetLayoutConstant(
+-      TabView().pinned_ ? LayoutConstant::kVerticalTabPinnedHeight
+-                        : LayoutConstant::kVerticalTabHeight);
++  // Sora: pinned tabs are laid out in the height their container gives them
++  // (Zen's 46px Essentials tiles when expanded), so the favicon stays centred.
++  const bool has_container_height =
++      TabView().pinned_ && size_bounds.height().is_bounded() &&
++      size_bounds.height().value() > 0;
++  const int height =
++      has_container_height
++          ? size_bounds.height().value()
++          : GetLayoutConstant(TabView().pinned_
++                                  ? LayoutConstant::kVerticalTabPinnedHeight
++                                  : LayoutConstant::kVerticalTabHeight);
+   views::ProposedLayout layouts;
+   layouts.host_size = gfx::Size(width, height);
+ 

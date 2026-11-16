@@ -1,0 +1,867 @@
+diff --git a/chrome/browser/ui/views/frame/BUILD.gn b/chrome/browser/ui/views/frame/BUILD.gn
+index 07ff356..d1c3d94 100644
+--- a/chrome/browser/ui/views/frame/BUILD.gn
++++ b/chrome/browser/ui/views/frame/BUILD.gn
+@@ -563,6 +563,9 @@ source_set("vertical_tab_strip_region_view") {
+     ":frame_separator",
+     ":safe_invoke",
+     ":shadow",
++
++    # Sora: the compact mode panel counts the toolbar on top of it.
++    ":top_container_view",
+     "//chrome/app:generated_resources",
+     "//chrome/browser/ui:browser_actions",
+     "//chrome/browser/ui:browser_element_identifiers",
+@@ -1875,9 +1878,14 @@ if (is_win) {
+       "//skia",
+       "//ui/base",
+       "//ui/base:features",
++
++      # Sora: auto-hiding window controls.
++      "//ui/compositor",
+       "//ui/display",
++      "//ui/events",
+       "//ui/gfx",
+       "//ui/strings:ui_strings",
++      "//ui/views",
+     ]
+   }
+ 
+diff --git a/chrome/browser/ui/views/frame/browser_frame_view_win.cc b/chrome/browser/ui/views/frame/browser_frame_view_win.cc
+index 5bafadd..c7a89f9 100644
+--- a/chrome/browser/ui/views/frame/browser_frame_view_win.cc
++++ b/chrome/browser/ui/views/frame/browser_frame_view_win.cc
+@@ -11,6 +11,7 @@
+ #include <utility>
+ 
+ #include "base/command_line.h"
++#include "base/functional/bind.h"
+ #include "base/memory/raw_ref.h"
+ #include "base/scoped_observation.h"
+ #include "base/trace_event/common/trace_event_common.h"
+@@ -46,8 +47,11 @@
+ #include "ui/base/ui_base_features.h"
+ #include "ui/base/win/hwnd_metrics.h"
+ #include "ui/color/color_provider_key.h"
++#include "ui/compositor/layer.h"
++#include "ui/display/screen.h"
+ #include "ui/display/win/dpi.h"
+ #include "ui/display/win/screen_win.h"
++#include "ui/gfx/animation/tween.h"
+ #include "ui/gfx/canvas.h"
+ #include "ui/gfx/geometry/dip_util.h"
+ #include "ui/gfx/geometry/rect_conversions.h"
+@@ -56,6 +60,7 @@
+ #include "ui/gfx/scoped_canvas.h"
+ #include "ui/gfx/win/icon_util.h"
+ #include "ui/strings/grit/ui_strings.h"
++#include "ui/views/event_monitor.h"
+ #include "ui/views/metadata/view_factory.h"
+ #include "ui/views/widget/widget.h"
+ #include "ui/views/widget/widget_observer.h"
+@@ -78,6 +83,15 @@ constexpr int kMaximizedLeftMargin = 2;
+ 
+ constexpr int kIconTitleSpacing = 5;
+ 
++// Sora: Zen's auto-hiding window controls (sora/zen-spec.md, section 1). The
++// strip above the contents card is this tall at rest and when revealed (the
++// caption buttons fill it then); it changes after a delay, in both directions.
++constexpr int kSoraWindowControlsRestHeight = 8;
++constexpr int kSoraWindowControlsRevealedHeight = 34;
++constexpr base::TimeDelta kSoraWindowControlsDelay = base::Milliseconds(200);
++constexpr base::TimeDelta kSoraWindowControlsDuration = base::Milliseconds(150);
++constexpr gfx::Tween::Type kSoraWindowControlsTween = gfx::Tween::EASE_IN_OUT;
++
+ }  // namespace
+ 
+ 
+@@ -127,6 +141,9 @@ BrowserFrameViewWin::BrowserFrameViewWin(BrowserWidget* widget,
+ 
+   caption_button_container_ =
+       AddChildView(std::make_unique<BrowserCaptionButtonContainer>(this));
++
++  sora_window_controls_reveal_.SetSlideDuration(kSoraWindowControlsDuration);
++  sora_window_controls_reveal_.SetTweenType(kSoraWindowControlsTween);
+ }
+ 
+ BrowserFrameViewWin::~BrowserFrameViewWin() = default;
+@@ -159,6 +176,10 @@ BrowserLayoutParams BrowserFrameViewWin::GetBrowserLayoutParams() const {
+       }
+     }
+   }
++  if (ShouldSoraAutoHideWindowControls()) {
++    params.sora_window_controls_strip_height =
++        GetSoraWindowControlsStripHeight();
++  }
+   return params;
+ }
+ 
+@@ -341,9 +362,12 @@ int BrowserFrameViewWin::NonClientHitTest(const gfx::Point& point) {
+   }
+ 
+   // Then see if the point is within any of the window controls.
++  // Sora: hidden window controls are inert, so the strip they hide in drags
++  // the window and Windows 11 shows no snap layouts for an invisible button.
+   const gfx::Point local_point =
+       ConvertPointToTarget(parent(), caption_button_container_, point);
+-  if (caption_button_container_->HitTestPoint(local_point)) {
++  if (AreSoraWindowControlsInteractive() &&
++      caption_button_container_->HitTestPoint(local_point)) {
+     const int hit_test_result =
+         caption_button_container_->NonClientHitTest(local_point);
+     if (hit_test_result != HTNOWHERE) {
+@@ -739,14 +763,121 @@ void BrowserFrameViewWin::LayoutCaptionButtons() {
+       hide_window_buttons ? gfx::Size()
+                           : caption_button_container_->GetPreferredSize();
+ 
+-  const int height =
++  int height =
+       !GetBrowserView()->GetWebAppFrameToolbarPreferredSize().IsEmpty()
+           ? (TitlebarHeight(false) - WindowTopY())
+           : GetFrameHeight();
++  // Sora: the buttons fill the revealed strip, whatever the toolbar height.
++  if (ShouldSoraAutoHideWindowControls()) {
++    height = GetTopInset(false) + kSoraWindowControlsRevealedHeight -
++             WindowTopY();
++  }
+ 
+   caption_button_container_->SetBounds(width() - preferred_size.width(),
+                                        WindowTopY(), preferred_size.width(),
+                                        height);
++  UpdateSoraWindowControls();
++}
++
++bool BrowserFrameViewWin::ShouldSoraAutoHideWindowControls() const {
++  // Only with the toolbar in the sidebar does nothing else sit above the
++  // contents card; Zen keeps its controls in the toolbar otherwise.
++  return !browser_widget()->IsFullscreen() &&
++         !GetBrowserView()->IsWindowControlsOverlayEnabled() &&
++         GetBrowserView()->IsSoraToolbarInSidebar();
++}
++
++bool BrowserFrameViewWin::AreSoraWindowControlsInteractive() const {
++  return !ShouldSoraAutoHideWindowControls() ||
++         sora_window_controls_reveal_.GetCurrentValue() > 0.0;
++}
++
++int BrowserFrameViewWin::GetSoraWindowControlsStripHeight() const {
++  return gfx::Tween::IntValueBetween(
++      sora_window_controls_reveal_.GetCurrentValue(),
++      kSoraWindowControlsRestHeight, kSoraWindowControlsRevealedHeight);
++}
++
++void BrowserFrameViewWin::UpdateSoraWindowControls() {
++  const bool auto_hide = ShouldSoraAutoHideWindowControls();
++  if (auto_hide) {
++    if (!sora_mouse_monitor_ && GetWidget()) {
++      sora_mouse_monitor_ = views::EventMonitor::CreateWindowMonitor(
++          &sora_mouse_observer_, GetWidget()->GetNativeWindow(),
++          {ui::EventType::kMouseMoved, ui::EventType::kMouseDragged,
++           ui::EventType::kMouseEntered, ui::EventType::kMouseExited});
++    }
++    // The buttons fade, so they need a layer; it also keeps them above the
++    // contents card, which slides under them.
++    if (!caption_button_container_->layer()) {
++      caption_button_container_->SetPaintToLayer();
++      caption_button_container_->layer()->SetFillsBoundsOpaquely(false);
++    }
++  } else {
++    sora_mouse_monitor_.reset();
++    sora_window_controls_delay_.Stop();
++    sora_window_controls_hovered_ = false;
++    sora_window_controls_reveal_.Reset(0.0);
++    // Window controls overlay keeps its own layer.
++    if (caption_button_container_->layer() &&
++        !GetBrowserView()->IsWindowControlsOverlayEnabled()) {
++      caption_button_container_->DestroyLayer();
++    }
++  }
++
++  const bool interactive = AreSoraWindowControlsInteractive();
++  if (!interactive &&
++      caption_button_container_->GetCanProcessEventsWithinSubtree()) {
++    // Don't leave a button hovered or pressed behind while hidden.
++    caption_button_container_->ResetWindowControls();
++  }
++  caption_button_container_->SetCanProcessEventsWithinSubtree(interactive);
++  if (ui::Layer* const layer = caption_button_container_->layer()) {
++    layer->SetOpacity(
++        auto_hide
++            ? static_cast<float>(sora_window_controls_reveal_.GetCurrentValue())
++            : 1.0f);
++  }
++}
++
++void BrowserFrameViewWin::OnSoraMouseEvent() {
++  // The cursor position works for every event, including the exit from the
++  // window: a strip only covers the inside of the window.
++  gfx::Point point = display::Screen::Get()->GetCursorScreenPoint();
++  views::View::ConvertPointFromScreen(GetBrowserView(), &point);
++  const bool hovered =
++      GetBrowserView()->GetSoraWindowControlsStrip().Contains(point);
++  if (hovered == sora_window_controls_hovered_) {
++    return;
++  }
++  sora_window_controls_hovered_ = hovered;
++  sora_window_controls_delay_.Start(
++      FROM_HERE, kSoraWindowControlsDelay,
++      base::BindOnce(&BrowserFrameViewWin::AnimateSoraWindowControls,
++                     base::Unretained(this)));
++}
++
++void BrowserFrameViewWin::AnimateSoraWindowControls() {
++  if (sora_window_controls_hovered_) {
++    sora_window_controls_reveal_.Show();
++  } else {
++    sora_window_controls_reveal_.Hide();
++  }
++}
++
++void BrowserFrameViewWin::AnimationProgressed(
++    const gfx::Animation* animation) {
++  UpdateSoraWindowControls();
++  // The browser layout moves the top of the contents card with the strip.
++  GetBrowserView()->InvalidateLayout();
++}
++
++void BrowserFrameViewWin::AnimationEnded(const gfx::Animation* animation) {
++  AnimationProgressed(animation);
++}
++
++void BrowserFrameViewWin::SoraMouseObserver::OnEvent(const ui::Event& event) {
++  frame_view_->OnSoraMouseEvent();
+ }
+ 
+ void BrowserFrameViewWin::LayoutClientView() {
+diff --git a/chrome/browser/ui/views/frame/browser_frame_view_win.h b/chrome/browser/ui/views/frame/browser_frame_view_win.h
+index e731b2c..e901d9a 100644
+--- a/chrome/browser/ui/views/frame/browser_frame_view_win.h
++++ b/chrome/browser/ui/views/frame/browser_frame_view_win.h
+@@ -6,14 +6,19 @@
+ #define CHROME_BROWSER_UI_VIEWS_FRAME_BROWSER_FRAME_VIEW_WIN_H_
+ 
+ #include <array>
++#include <memory>
+ 
+ #include "base/memory/raw_ptr.h"
++#include "base/timer/timer.h"
+ #include "base/win/scoped_gdi_object.h"
+ #include "chrome/browser/ui/views/frame/browser_frame_view.h"
+ #include "chrome/browser/ui/views/frame/windows_caption_button.h"
+ #include "chrome/browser/ui/views/tab_icon_view.h"
+ #include "chrome/browser/ui/views/tab_icon_view_model.h"
+ #include "ui/base/metadata/metadata_header_macros.h"
++#include "ui/events/event_observer.h"
++#include "ui/gfx/animation/animation_delegate.h"
++#include "ui/gfx/animation/slide_animation.h"
+ #include "ui/gfx/geometry/rounded_corners_f.h"
+ #include "ui/views/window/frame_view.h"
+ 
+@@ -21,10 +26,13 @@ class BrowserView;
+ class BrowserCaptionButtonContainer;
+ 
+ namespace views {
++class EventMonitor;
+ class Label;
+ }
+ 
+-class BrowserFrameViewWin : public BrowserFrameView, public TabIconViewModel {
++class BrowserFrameViewWin : public BrowserFrameView,
++                            public TabIconViewModel,
++                            public gfx::AnimationDelegate {
+   METADATA_HEADER(BrowserFrameViewWin, BrowserFrameView)
+ 
+  public:
+@@ -161,6 +169,43 @@ class BrowserFrameViewWin : public BrowserFrameView, public TabIconViewModel {
+   // Displays the next throbber frame.
+   void DisplayNextThrobberFrame();
+ 
++  // Sora: Zen's auto-hiding window controls (zen.view.hide-window-controls,
++  // sora/zen-spec.md, section 1). While the toolbar is in the sidebar, the
++  // strip above the contents card is a few pixels tall and the caption buttons
++  // are invisible and inert; hovering the strip grows it to the buttons'
++  // height and fades them in. The browser layout reads the strip height from
++  // GetBrowserLayoutParams().
++  bool ShouldSoraAutoHideWindowControls() const;
++  // Whether the caption buttons take mouse input (always, unless hidden).
++  bool AreSoraWindowControlsInteractive() const;
++  int GetSoraWindowControlsStripHeight() const;
++  // Applies the reveal amount to the caption buttons and starts or stops
++  // watching the mouse.
++  void UpdateSoraWindowControls();
++  void OnSoraMouseEvent();
++  void AnimateSoraWindowControls();
++
++  // gfx::AnimationDelegate:
++  void AnimationProgressed(const gfx::Animation* animation) override;
++  void AnimationEnded(const gfx::Animation* animation) override;
++
++  // Sora: forwards the window's mouse events to OnSoraMouseEvent(). Separate
++  // from the frame view, whose views::View::OnEvent() it would hide.
++  class SoraMouseObserver : public ui::EventObserver {
++   public:
++    explicit SoraMouseObserver(BrowserFrameViewWin* frame_view)
++        : frame_view_(frame_view) {}
++    SoraMouseObserver(const SoraMouseObserver&) = delete;
++    SoraMouseObserver& operator=(const SoraMouseObserver&) = delete;
++    ~SoraMouseObserver() override = default;
++
++    // ui::EventObserver:
++    void OnEvent(const ui::Event& event) override;
++
++   private:
++    const raw_ptr<BrowserFrameViewWin> frame_view_;
++  };
++
+   // The bounds of the ClientView.
+   gfx::Rect client_view_bounds_;
+ 
+@@ -182,6 +227,15 @@ class BrowserFrameViewWin : public BrowserFrameView, public TabIconViewModel {
+   // The index of the current frame of the throbber animation.
+   int throbber_frame_ = 0;
+ 
++  // Sora: auto-hiding window controls state, see
++  // ShouldSoraAutoHideWindowControls(). The monitor is declared after the
++  // observer so that it is destroyed first.
++  SoraMouseObserver sora_mouse_observer_{this};
++  std::unique_ptr<views::EventMonitor> sora_mouse_monitor_;
++  bool sora_window_controls_hovered_ = false;
++  base::OneShotTimer sora_window_controls_delay_;
++  gfx::SlideAnimation sora_window_controls_reveal_{this};
++
+   static const int kThrobberIconCount = 24;
+   static std::array<HICON, kThrobberIconCount> throbber_icons_;
+   static void InitThrobberIcons();
+diff --git a/chrome/browser/ui/views/frame/browser_view.cc b/chrome/browser/ui/views/frame/browser_view.cc
+index 928a723..607b5a8 100644
+--- a/chrome/browser/ui/views/frame/browser_view.cc
++++ b/chrome/browser/ui/views/frame/browser_view.cc
+@@ -1466,6 +1466,56 @@ bool BrowserView::ShouldDrawVerticalTabStrip() const {
+          browser_->GetType() == BrowserWindowInterface::Type::TYPE_NORMAL;
+ }
+ 
++bool BrowserView::IsSoraToolbarInSidebar() const {
++  return vertical_tab_strip_region_view_ && ShouldDrawVerticalTabStrip() &&
++         IsToolbarVisible() &&
++         vertical_tab_strip_region_view_->IsSoraToolbarInSidebar();
++}
++
++gfx::Rect BrowserView::GetSoraWindowControlsStrip() const {
++  if (!IsSoraToolbarInSidebar() || !main_shadow_overlay_) {
++    return gfx::Rect();
++  }
++  // The shadow overlay frames the contents card.
++  const gfx::Rect card = main_shadow_overlay_->bounds();
++  int left = card.x();
++  if (vertical_tab_strip_region_view_->GetVisible()) {
++    left = std::max(left, vertical_tab_strip_region_view_->bounds().right());
++  }
++  return gfx::Rect(left, 0, std::max(0, width() - left), std::max(0, card.y()));
++}
++
++void BrowserView::UpdateSoraCompactTopContainer() {
++  // Immersive mode reparents the top container; leave it alone then.
++  if (top_container_->parent() != this) {
++    return;
++  }
++  const bool floating =
++      IsSoraToolbarInSidebar() &&
++      vertical_tab_strip_region_view_->IsSoraCompactMode();
++  if (floating == sora_top_container_floating_) {
++    return;
++  }
++  sora_top_container_floating_ = floating;
++  if (floating) {
++    top_container_->SetPaintToLayer();
++    top_container_->layer()->SetFillsBoundsOpaquely(false);
++    // Right after the panel: above it and the contents, below the find bar
++    // and the scrims.
++    const size_t top_container_index = *GetIndexOf(top_container_.get());
++    const size_t panel_index =
++        *GetIndexOf(vertical_tab_strip_region_view_.get());
++    if (top_container_index < panel_index) {
++      ReorderChildView(top_container_.get(), panel_index);
++    }
++  } else {
++    top_container_->DestroyLayer();
++    ReorderChildView(top_container_.get(),
++                     top_container_insertion_index_.value());
++  }
++  EnsureFocusOrder();
++}
++
+ bool BrowserView::ShouldDrawWebAppFrameToolbar() const {
+   return !IsUnframedModeEnabled() &&
+          GetFrameView()->ShouldShowWebAppFrameToolbar();
+@@ -4771,6 +4821,13 @@ int BrowserView::NonClientHitTest(const gfx::Point& point) {
+     }
+   }
+ 
++  // Sora: the strip above the contents card belongs to the window frame, where
++  // the auto-hiding window controls live. HTNOWHERE lets the frame hit-test
++  // them before falling back to HTCAPTION, so the strip also drags the window.
++  if (GetSoraWindowControlsStrip().Contains(point_in_browser_view_coords)) {
++    return HTNOWHERE;
++  }
++
+   // For apps with window-controls-overlay or unframed display mode, see if
+   // we're in an app defined draggable region so we can return `HTCAPTION`.
+   web_app::AppBrowserController* controller =
+@@ -4885,6 +4942,9 @@ void BrowserView::Layout(PassKey) {
+     did_first_layout_while_top_controls_are_sliding_ = false;
+   }
+ 
++  // Sora: before the layout, which places the top container on the panel.
++  UpdateSoraCompactTopContainer();
++
+   LayoutSuperclass<views::View>(this);
+ 
+   // TODO(jamescook): Why was this in the middle of layout code?
+diff --git a/chrome/browser/ui/views/frame/browser_view.h b/chrome/browser/ui/views/frame/browser_view.h
+index e7bfac1..2136c4f 100644
+--- a/chrome/browser/ui/views/frame/browser_view.h
++++ b/chrome/browser/ui/views/frame/browser_view.h
+@@ -340,6 +340,18 @@ class BrowserView : public BrowserWindow,
+   // Returns whether a vertical tabstrip should be shown.
+   bool ShouldDrawVerticalTabStrip() const;
+ 
++  // Sora: whether the toolbar sits in the expanded sidebar, in its column or
++  // on the compact mode panel (sidebar-toolbar.patch), so that nothing but
++  // the window controls sits above the contents card.
++  bool IsSoraToolbarInSidebar() const;
++
++  // Sora: the strip above the contents card, in this view's coordinates: from
++  // the card's leading edge (or past a sidebar panel floating over it) to the
++  // trailing window edge, down to the card. It belongs to the window frame
++  // and hovering it reveals Zen's auto-hiding window controls (see
++  // BrowserFrameViewWin). Empty unless IsSoraToolbarInSidebar().
++  gfx::Rect GetSoraWindowControlsStrip() const;
++
+   // Returns whether the webapp frame toolbar should be drawn.
+   bool ShouldDrawWebAppFrameToolbar() const;
+ 
+@@ -940,6 +952,12 @@ class BrowserView : public BrowserWindow,
+   // Returns the y coordinate of the client area.
+   int GetClientAreaTop();
+ 
++  // Sora: in compact mode with the toolbar on the floating sidebar panel, the
++  // top container paints on a layer above the panel and the contents, and
++  // takes their events, as immersive mode's overlay does on other platforms.
++  // Called before each layout; restores the regular stacking otherwise.
++  void UpdateSoraCompactTopContainer();
++
+   // Invoked to prepare the transition of fullscreen state.
+   // If features::kAsyncFullscreenWindowState is disabled, this is invoked
+   // synchronously when requesting platform window state changes.
+@@ -1142,6 +1160,9 @@ class BrowserView : public BrowserWindow,
+   // This is used to correctly reparent the top container when exiting
+   // fullscreen mode. See BrowserView::ReparentTopContainerForEndOfImmersive.
+   std::optional<size_t> top_container_insertion_index_;
++  // Sora: whether the top container floats, see
++  // UpdateSoraCompactTopContainer().
++  bool sora_top_container_floating_ = false;
+ 
+   // Optional offset applied to background painted by ThemedBackground w.r.t to
+   // the browswe_view. (See `ThemedBackground::PaintThemeAlignedImage()` for
+diff --git a/chrome/browser/ui/views/frame/layout/browser_view_layout_params.h b/chrome/browser/ui/views/frame/layout/browser_view_layout_params.h
+index 6a91b9b..aef40c7 100644
+--- a/chrome/browser/ui/views/frame/layout/browser_view_layout_params.h
++++ b/chrome/browser/ui/views/frame/layout/browser_view_layout_params.h
+@@ -93,6 +93,10 @@ struct BrowserLayoutParams {
+   // `content` and `content_with_padding` to determine the area it is safe to
+   // draw in.
+   BrowserLayoutExclusionArea trailing_exclusion;
++  // Sora: current height of Zen's auto-hiding window controls strip above the
++  // contents card, from the top of the visual client area; 0 when the frame
++  // doesn't hide its controls (see BrowserFrameViewWin).
++  int sora_window_controls_strip_height = 0;
+ 
+   bool operator==(const BrowserLayoutParams&) const = default;
+ 
+diff --git a/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc b/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc
+index 3f4f01d..fb03ac6 100644
+--- a/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc
++++ b/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc
+@@ -92,6 +92,18 @@ constexpr double kGlassExpandOnHoverOpacity = 0.95;
+ constexpr int kSoraCompactPanelInset = 4;
+ constexpr int kSoraCompactRevealStripWidth = 5;
+ 
++// Sora: gives `corners` the compact mode panel's rounded top corners, for the
++// toolbar riding on the panel.
++void SetSoraCompactPanelTopCorners(CustomCornersBackground::Corners& corners) {
++  for (const CornerOrientation corner :
++       {CornerOrientation::kTopLeading, CornerOrientation::kTopTrailing}) {
++    corners[corner] = {
++        .type = CustomCornersBackground::CornerType::kRounded,
++        .radius =
++            static_cast<int>(MultiContentsView::kSplitViewContentCornerRadius)};
++  }
++}
++
+ // Increases the leading or trailing exclusion padding to `minimum`.
+ void IncreasePaddingToMinimum(BrowserLayoutParams& params, int minimum) {
+   // Default to increasing the trailing exclusion padding. On ChromeOS, the
+@@ -238,6 +250,11 @@ struct BrowserViewTabbedLayoutImpl::TransientLayoutData {
+   // Sora: compact mode is on (VerticalTabStripRegionView::IsSoraCompactMode()):
+   // the vertical tab strip takes no room and floats over the contents.
+   bool sora_compact_mode = false;
++  // Sora: with an expanded vertical tab strip the toolbar sits at the top of
++  // the sidebar column, or of the floating panel in compact mode, as in Zen
++  // (see ToolbarView::UpdateSoraSidebarMode()). Nothing but the window
++  // controls strip is left above the contents card then.
++  bool sora_sidebar_toolbar = false;
+ 
+   double vertical_tabs_top_corner() const {
+     double top_corner = vertical_tab_strip_animation.top_corner;
+@@ -914,14 +931,13 @@ BrowserViewTabbedLayoutImpl::CalculateProposedLayout(
+   bool clip_content_for_animation = false;
+   gfx::Rect unclipped_contents_region = params.visual_client_area;
+ 
+-  // Sora: with an expanded vertical tab strip the toolbar sits at the top of
+-  // the sidebar column, as in Zen (see ToolbarView::UpdateSoraSidebarMode()).
+-  const bool sora_sidebar_toolbar =
+-      layout_data_->separator_info.sora_floating_contents &&
+-      !layout_data_->sora_compact_mode &&
+-      !delegate().IsVerticalTabStripCollapsed() &&
+-      delegate().IsToolbarVisible() &&
+-      IsParentedTo(views().top_container, views().browser_view);
++  // Sora: where the toolbar goes when it is in the sidebar (see
++  // TransientLayoutData::sora_sidebar_toolbar): the top of the sidebar column,
++  // or the top of the compact mode panel.
++  const bool sora_sidebar_toolbar = layout_data_->sora_sidebar_toolbar &&
++                                    !layout_data_->sora_compact_mode;
++  const bool sora_panel_toolbar =
++      layout_data_->sora_sidebar_toolbar && layout_data_->sora_compact_mode;
+ 
+   // Lay out vertical tab strip if visible.
+   int collapsed_vertical_tab_strip_adjustment = 0;
+@@ -1108,7 +1124,8 @@ BrowserViewTabbedLayoutImpl::CalculateProposedLayout(
+ 
+   // When the tabstrip isn't at the top or in constrained widths, the top
+   // container is laid out before all side panels.
+-  if (horizontal_layout.force_top_container_to_top && !sora_sidebar_toolbar &&
++  if (horizontal_layout.force_top_container_to_top &&
++      !layout_data_->sora_sidebar_toolbar &&
+       IsParentedTo(views().top_container, views().browser_view)) {
+     auto& top_container_layout =
+         layout.AddChild(views().top_container, gfx::Rect());
+@@ -1149,9 +1166,36 @@ BrowserViewTabbedLayoutImpl::CalculateProposedLayout(
+     const int hidden_x = area.x() + kSoraCompactRevealStripWidth - width;
+     const int shown_x = area.x() + kSoraCompactPanelInset;
+     const int top = area.y() + kSoraCompactPanelInset;
++    const int height =
++        std::max(0, area.bottom() - kSoraCompactPanelInset - top);
+     sora_compact_strip_layout->bounds = gfx::Rect(
+         gfx::Tween::IntValueBetween(reveal, hidden_x, shown_x), top, width,
+-        std::max(0, area.bottom() - kSoraCompactPanelInset - top));
++        height);
++
++    // The toolbar rides on the top of the panel, which leaves that much room
++    // for it. Hidden, it starts the hot strip's width further out, so that it
++    // never covers the hot strip; it catches up as the panel slides in.
++    int toolbar_inset = 0;
++    if (sora_panel_toolbar) {
++      auto& top_container_layout =
++          layout.AddChild(views().top_container, gfx::Rect());
++      BrowserLayoutParams panel_params;
++      panel_params.visual_client_area = gfx::Rect(width, height);
++      const gfx::Rect top_container_local_bounds = CalculateTopContainerLayout(
++          top_container_layout, panel_params, /*needs_exclusion=*/false);
++      panel_params.visual_client_area.set_origin(gfx::Point(
++          gfx::Tween::IntValueBetween(
++              reveal, hidden_x - kSoraCompactRevealStripWidth, shown_x),
++          top));
++      top_container_layout.bounds = GetTopContainerBoundsInParent(
++          top_container_local_bounds, panel_params);
++      toolbar_inset = top_container_layout.bounds.height();
++    }
++    views().vertical_tab_strip_region_view->SetSoraToolbarInsetForLayout(
++        toolbar_inset);
++  } else if (IsParentedTo(views().vertical_tab_strip_region_view,
++                          views().browser_view)) {
++    views().vertical_tab_strip_region_view->SetSoraToolbarInsetForLayout(0);
+   }
+ 
+   // Lay out the main area background.
+@@ -1234,17 +1278,27 @@ BrowserViewTabbedLayoutImpl::CalculateProposedLayout(
+   }
+ 
+   gfx::Insets shadow_overlay_insets;
++  // Sora: how far the window controls strip covers the top of the page.
++  int sora_strip_clip = 0;
+   if (layout_data_->separator_info.sora_floating_contents) {
+     // The vertical tab strip already pads its own trailing edge, so the card
+     // only needs a margin on the other three sides.
+     const int margin = MultiContentsView::kSplitViewContentInset;
+     // Without a toolbar above the contents, the caption buttons sit in a band
+     // over the card, like Zen's revealed window-controls strip.
+-    const int top_margin =
++    int top_margin =
+         sora_sidebar_toolbar
+             ? std::max(margin, base::ClampCeil(
+                                    params.trailing_exclusion.content.height()))
+             : margin;
++    // Sora: a frame that hides its controls Zen's way gives the strip height;
++    // as it grows the card's top edge slides down over a page that stays put
++    // (see the contents clip below).
++    if (layout_data_->sora_sidebar_toolbar &&
++        params.sora_window_controls_strip_height > 0) {
++      top_margin = std::max(margin, params.sora_window_controls_strip_height);
++      sora_strip_clip = top_margin - margin;
++    }
+     // Sora: with the strip floating in compact mode, the card gets the margin
+     // on its leading side too.
+     const int leading_margin = layout_data_->sora_compact_mode ? margin : 0;
+@@ -1404,6 +1458,10 @@ BrowserViewTabbedLayoutImpl::CalculateProposedLayout(
+         }
+         unclipped_contents_region.Outset(gfx::Outsets::TLBR(
+             top_inset, 0, shadow_overlay_insets.bottom(), 0));
++      } else {
++        // Sora: keep the page under the window controls strip, see below.
++        unclipped_contents_region.Outset(
++            gfx::Outsets::TLBR(sora_strip_clip, 0, 0, 0));
+       }
+ 
+       // Avoid cases where these areas are somehow misaligned (shouldn't happen,
+@@ -1423,6 +1481,16 @@ BrowserViewTabbedLayoutImpl::CalculateProposedLayout(
+       if (main_background_layout) {
+         main_background_layout->visibility = true;
+       }
++    } else if (sora_strip_clip > 0) {
++      // Sora: the revealed window controls strip covers the top of the page
++      // instead of pushing it down, as in Zen: the contents keep their rest
++      // size and position and are clipped below the strip.
++      gfx::Rect unclipped_contents = contents_layout.bounds;
++      unclipped_contents.Outset(gfx::Outsets::TLBR(sora_strip_clip, 0, 0, 0));
++      views().multi_contents_view->SetTargetContentBounds(
++          MultiContentsView::TargetContentBounds(
++              unclipped_contents.size(),
++              gfx::Insets::TLBR(sora_strip_clip, 0, 0, 0)));
+     } else {
+       views().multi_contents_view->SetTargetContentBounds(std::nullopt);
+     }
+@@ -1648,6 +1716,12 @@ void BrowserViewTabbedLayoutImpl::ConfigureTopContainerBackground(
+     }
+   }
+ 
++  // Sora: on the compact mode panel the toolbar is the panel's top, so it
++  // takes the panel's top corners.
++  if (layout_data_->sora_sidebar_toolbar && layout_data_->sora_compact_mode) {
++    SetSoraCompactPanelTopCorners(corners);
++  }
++
+   background->SetCorners(corners);
+ }
+ 
+@@ -1685,6 +1759,11 @@ void BrowserViewTabbedLayoutImpl::DoPreLayoutComputations(
+   layout_data_->separator_info = CalculateSeparatorInfo();
+   layout_data_->side_panel_content_animation =
+       CalculateSidePanelContentAnimation();
++  layout_data_->sora_sidebar_toolbar =
++      layout_data_->separator_info.sora_floating_contents &&
++      !delegate().IsVerticalTabStripCollapsed() &&
++      delegate().IsToolbarVisible() &&
++      IsParentedTo(views().top_container, views().browser_view);
+ }
+ 
+ void BrowserViewTabbedLayoutImpl::DoPostLayoutVisualAdjustments(
+@@ -2004,6 +2083,11 @@ void BrowserViewTabbedLayoutImpl::DoPostLayoutVisualAdjustments(
+         toolbar_corners[CornerOrientation::kTopTrailing] =
+             toolbar_background->GetWindowCorner(/*upper=*/true);
+       }
++      // Sora: see ConfigureTopContainerBackground().
++      if (layout_data_->sora_sidebar_toolbar &&
++          layout_data_->sora_compact_mode) {
++        SetSoraCompactPanelTopCorners(toolbar_corners);
++      }
+       break;
+     }
+     default:
+diff --git a/chrome/browser/ui/views/frame/vertical_tab_strip_region_view.cc b/chrome/browser/ui/views/frame/vertical_tab_strip_region_view.cc
+index 190a257..75aa93b 100644
+--- a/chrome/browser/ui/views/frame/vertical_tab_strip_region_view.cc
++++ b/chrome/browser/ui/views/frame/vertical_tab_strip_region_view.cc
+@@ -44,6 +44,7 @@
+ #include "chrome/browser/ui/views/frame/safe_invoke/safe_invoke.h"
+ #include "chrome/browser/ui/views/frame/shadow_frame_view.h"
+ #include "chrome/browser/ui/views/frame/tab_strip_region_view.h"
++#include "chrome/browser/ui/views/frame/top_container_view.h"
+ #include "chrome/browser/ui/views/tabs/common/pinned_tab_container_view.h"
+ #include "chrome/browser/ui/views/tabs/common/root_tab_collection_node.h"
+ #include "chrome/browser/ui/views/tabs/common/tab_collection_node.h"
+@@ -485,6 +486,14 @@ void VerticalTabStripRegionView::SetToolbarHeightForLayout(int toolbar_height) {
+   top_button_container_->SetToolbarHeightForLayout(toolbar_height);
+ }
+ 
++void VerticalTabStripRegionView::SetSoraToolbarInsetForLayout(int inset) {
++  if (inset == sora_toolbar_inset_) {
++    return;
++  }
++  sora_toolbar_inset_ = inset;
++  InvalidateLayout();
++}
++
+ void VerticalTabStripRegionView::SetCaptionButtonWidthForLayout(
+     int caption_button_width) {
+   top_button_container_->SetCaptionButtonWidthForLayout(caption_button_width);
+@@ -588,6 +597,8 @@ views::ProposedLayout VerticalTabStripRegionView::CalculateProposedLayout(
+ 
+   // There's a bit of padding at the bottom of the tabstrip.
+   available.Inset(gfx::Insets::TLBR(0, 0, vertical_padding, 0));
++  // Sora: leave the top of the compact mode panel to the toolbar.
++  available.Inset(gfx::Insets::TLBR(sora_toolbar_inset_, 0, 0, 0));
+ 
+   // Lay out the top button container.
+   layout.child_layouts.push_back(
+@@ -1004,8 +1015,10 @@ VerticalTabStripRegionView::RegionViewFocusListener::RegionViewFocusListener(
+ void VerticalTabStripRegionView::RegionViewFocusListener::OnDidChangeFocus(
+     views::View* focused_before,
+     views::View* focused_now) {
+-  if ((focused_before && region_view_->Contains(focused_before)) ||
+-      (focused_now && region_view_->Contains(focused_now))) {
++  // Sora: IsInSoraCompactPanel() also counts the toolbar on the compact mode
++  // panel.
++  if (region_view_->IsInSoraCompactPanel(focused_before) ||
++      region_view_->IsInSoraCompactPanel(focused_now)) {
+     region_view_->UpdateExpandOnHoverState();
+   }
+ }
+@@ -1126,11 +1139,11 @@ bool VerticalTabStripRegionView::IsCollapseButtonHovered() const {
+ 
+ bool VerticalTabStripRegionView::IsSoraToolbarInSidebar() const {
+   // Same test as the toolbar: an expanded strip outside fullscreen, where the
+-  // browser layout puts the top container in the sidebar column.
++  // browser layout puts the top container in the sidebar column, or at the
++  // top of the compact mode panel.
+   const views::Widget* const widget = GetWidget();
+-  // Sora: in compact mode the toolbar stays above the contents instead.
+   return !state_controller_->IsCollapsed() &&
+-         !(widget && widget->IsFullscreen()) && !IsSoraCompactMode();
++         !(widget && widget->IsFullscreen());
+ }
+ 
+ bool VerticalTabStripRegionView::IsSoraCompactMode() const {
+@@ -1185,7 +1198,8 @@ void VerticalTabStripRegionView::UpdateSoraCompactReveal(
+   }
+   AnimateSoraCompactReveal(
+       hovered.value_or(IsSoraCompactPanelHovered()) ||
+-      (GetFocusManager() && Contains(GetFocusManager()->GetFocusedView())));
++      (GetFocusManager() &&
++       IsInSoraCompactPanel(GetFocusManager()->GetFocusedView())));
+ }
+ 
+ void VerticalTabStripRegionView::AnimateSoraCompactReveal(bool show) {
+@@ -1232,6 +1246,21 @@ bool VerticalTabStripRegionView::IsSoraCompactPanelHovered() const {
+   return HitTestPoint(in_panel) && parent()->HitTestPoint(in_parent);
+ }
+ 
++bool VerticalTabStripRegionView::IsInSoraCompactPanel(
++    const views::View* view) const {
++  if (!view) {
++    return false;
++  }
++  if (Contains(view)) {
++    return true;
++  }
++  // The toolbar counts while it rides on the panel, so focusing it (Ctrl+L,
++  // Alt+D, F6) reveals the panel and keeps it out while it has focus.
++  const views::View* const top_container = browser_view()->top_container();
++  return IsSoraCompactMode() && IsSoraToolbarInSidebar() && top_container &&
++         top_container->Contains(view);
++}
++
+ void VerticalTabStripRegionView::AnimationProgressed(
+     const gfx::Animation* animation) {
+   // The browser layout places the panel from the reveal amount.
+@@ -1509,8 +1538,12 @@ void VerticalTabStripRegionView::UnregisterExpandOnHoverLock(
+ void VerticalTabStripRegionView::OnOmniboxPopupVisibilityChanged(bool is_open) {
+   if (is_open) {
+     if (!omnibox_open_lock_) {
+-      omnibox_open_lock_ =
+-          GetExpandOnHoverLock(ExpandOnHoverLockType::kForceCollapse);
++      // Sora: with the toolbar on the compact mode panel, the omnibox popup
++      // hangs from the panel, which must stay out while it is open.
++      omnibox_open_lock_ = GetExpandOnHoverLock(
++          IsSoraCompactMode() && IsSoraToolbarInSidebar()
++              ? ExpandOnHoverLockType::kKeepExpanded
++              : ExpandOnHoverLockType::kForceCollapse);
+       UpdateExpandOnHoverState();
+     }
+   } else {
+diff --git a/chrome/browser/ui/views/frame/vertical_tab_strip_region_view.h b/chrome/browser/ui/views/frame/vertical_tab_strip_region_view.h
+index f98a09a..dbc5773 100644
+--- a/chrome/browser/ui/views/frame/vertical_tab_strip_region_view.h
++++ b/chrome/browser/ui/views/frame/vertical_tab_strip_region_view.h
+@@ -151,6 +151,16 @@ class VerticalTabStripRegionView final
+   bool IsSoraCompactMode() const;
+   double GetSoraCompactRevealAmount() const;
+ 
++  // Sora: whether the toolbar sits at the top of the sidebar, mirroring
++  // ToolbarView::UpdateSoraSidebarMode() (sidebar-toolbar.patch): in the
++  // sidebar column, or in compact mode at the top of the floating panel. The
++  // strip's own top button row is hidden then, as Zen has none.
++  bool IsSoraToolbarInSidebar() const;
++
++  // Sora: height of the toolbar the browser layout puts over the top of the
++  // compact mode panel; the strip's contents start below it.
++  void SetSoraToolbarInsetForLayout(int inset);
++
+   ShadowFrameView* shadow_frame() { return shadow_frame_; }
+   int uncollapsed_width() const {
+     return target_collapse_state_.uncollapsed_width;
+@@ -209,11 +219,6 @@ class VerticalTabStripRegionView final
+ 
+   bool IsCollapseButtonHovered() const;
+ 
+-  // Sora: whether the toolbar sits at the top of the sidebar, mirroring
+-  // ToolbarView::UpdateSoraSidebarMode() (sidebar-toolbar.patch). The strip's
+-  // own top button row is hidden then, as Zen has none.
+-  bool IsSoraToolbarInSidebar() const;
+-
+   // Returns the bounds within which tabs can be dragged in the vertical tab
+   // strip.
+   gfx::Rect GetTabStripDraggableBounds() const override;
+@@ -226,6 +231,9 @@ class VerticalTabStripRegionView final
+   void AnimateSoraCompactReveal(bool show);
+   void OnSoraCompactExitDelayElapsed();
+   bool IsSoraCompactPanelHovered() const;
++  // Sora: whether `view` is in the compact mode panel, counting the toolbar
++  // the browser layout puts at its top.
++  bool IsInSoraCompactPanel(const views::View* view) const;
+ 
+   // views::AnimationDelegateViews:
+   void AnimationProgressed(const gfx::Animation* animation) override;
+@@ -326,6 +334,7 @@ class VerticalTabStripRegionView final
+   // Sora: compact mode state, see IsSoraCompactMode().
+   BooleanPrefMember sora_compact_mode_;
+   bool sora_compact_revealed_ = false;
++  int sora_toolbar_inset_ = 0;
+   gfx::SlideAnimation sora_compact_reveal_{this};
+ 
+   base::CallbackListSubscription paint_as_active_subscription_;
+diff --git a/chrome/browser/ui/views/toolbar/toolbar_view.cc b/chrome/browser/ui/views/toolbar/toolbar_view.cc
+index e3de59f..6ce9c36 100644
+--- a/chrome/browser/ui/views/toolbar/toolbar_view.cc
++++ b/chrome/browser/ui/views/toolbar/toolbar_view.cc
+@@ -1569,18 +1569,16 @@ void ToolbarView::Layout(PassKey) {
+ void ToolbarView::UpdateSoraSidebarMode() {
+   const auto* controller =
+       tabs::VerticalTabStripStateController::From(browser_view_->browser());
+-  // Sora: compact mode only exists with vertical tabs. When it is on the
+-  // sidebar is hidden, so the toolbar keeps its regular row above the contents.
++  // Sora: compact mode only exists with vertical tabs. When it is on, the
++  // toolbar keeps its two rows at the top of the floating sidebar panel.
+   const bool vertical_tabs =
+       controller && controller->ShouldDisplayVerticalTabs();
+-  const bool compact_mode =
+-      sora_compact_mode_button_ && sora_compact_mode_.GetValue();
+   if (sora_compact_mode_button_) {
+     sora_compact_mode_button_->SetVisible(vertical_tabs);
+   }
+   const bool sidebar_mode = display_mode_ == DisplayMode::kNormal &&
+                             location_bar_view_ && vertical_tabs &&
+-                            !controller->IsCollapsed() && !compact_mode;
++                            !controller->IsCollapsed();
+   if (sidebar_mode == sora_sidebar_mode_) {
+     return;
+   }

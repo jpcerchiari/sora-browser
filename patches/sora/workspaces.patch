@@ -1,0 +1,1457 @@
+diff --git a/chrome/browser/ui/accelerator_table.cc b/chrome/browser/ui/accelerator_table.cc
+index 1c0f41d..f2aa358 100644
+--- a/chrome/browser/ui/accelerator_table.cc
++++ b/chrome/browser/ui/accelerator_table.cc
+@@ -265,6 +265,12 @@ const AcceleratorMapping kTabGroupAcceleratorMap[] = {
+     {ui::VKEY_X, ui::EF_SHIFT_DOWN | ui::EF_ALT_DOWN, IDC_FOCUS_NEXT_TAB_GROUP},
+     {ui::VKEY_Z, ui::EF_SHIFT_DOWN | ui::EF_ALT_DOWN, IDC_FOCUS_PREV_TAB_GROUP},
+     {ui::VKEY_W, ui::EF_SHIFT_DOWN | ui::EF_ALT_DOWN, IDC_CLOSE_TAB_GROUP},
++    // Sora: Zen's next/previous workspace (zen-keysets.inc.xhtml). With focus
++    // mode on, these move the focus between groups, i.e. switch workspaces.
++    {ui::VKEY_RIGHT, ui::EF_CONTROL_DOWN | ui::EF_ALT_DOWN,
++     IDC_FOCUS_NEXT_TAB_GROUP},
++    {ui::VKEY_LEFT, ui::EF_CONTROL_DOWN | ui::EF_ALT_DOWN,
++     IDC_FOCUS_PREV_TAB_GROUP},
+ };
+ #endif  // !BUILDFLAG(IS_MAC) && !BUILDFLAG(IS_CHROMEOS)
+ 
+diff --git a/chrome/browser/ui/ui_features.cc b/chrome/browser/ui/ui_features.cc
+index 1f95858..fee28e6 100644
+--- a/chrome/browser/ui/ui_features.cc
++++ b/chrome/browser/ui/ui_features.cc
+@@ -547,9 +547,13 @@ BASE_FEATURE_PARAM(bool,
+ BASE_FEATURE(kAiOverlayDisableNavigationContext,
+              base::FEATURE_DISABLED_BY_DEFAULT);
+ 
+-BASE_FEATURE(kTabGroupsFocusing, base::FEATURE_DISABLED_BY_DEFAULT);
++// Sora: on by default. Tab group focus mode backs Zen's workspaces: the
++// focused group is the active workspace (sora_workspaces_controller.h).
++BASE_FEATURE(kTabGroupsFocusing, base::FEATURE_ENABLED_BY_DEFAULT);
+ 
+-BASE_FEATURE_PARAM(bool, kTabGroupsFocusFreezing, &kTabGroupsFocusing, true);
++// Sora: off by default. Zen keeps the tabs of other workspaces running (media
++// keeps playing), so they are not frozen.
++BASE_FEATURE_PARAM(bool, kTabGroupsFocusFreezing, &kTabGroupsFocusing, false);
+ 
+ bool IsTabGroupsFocusFreezingEnabled() {
+   return base::FeatureList::IsEnabled(kTabGroupsFocusing) &&
+diff --git a/chrome/browser/ui/views/frame/vertical_tab_strip_region_view.cc b/chrome/browser/ui/views/frame/vertical_tab_strip_region_view.cc
+index 190a257..79d7103 100644
+--- a/chrome/browser/ui/views/frame/vertical_tab_strip_region_view.cc
++++ b/chrome/browser/ui/views/frame/vertical_tab_strip_region_view.cc
+@@ -54,6 +54,8 @@
+ #include "chrome/browser/ui/views/tabs/common/unpinned_tab_container_view.h"
+ #include "chrome/browser/ui/views/tabs/shared/drop_arrow.h"
+ #include "chrome/browser/ui/views/tabs/shared/new_tab_button.h"
++#include "chrome/browser/ui/views/tabs/vertical/sora_workspace_views.h"
++#include "chrome/browser/ui/views/tabs/vertical/sora_workspaces_controller.h"
+ #include "chrome/browser/ui/views/tabs/vertical/top_container_button.h"
+ #include "chrome/browser/ui/views/tabs/vertical/vertical_tab_strip_bottom_container.h"
+ #include "chrome/browser/ui/views/tabs/vertical/vertical_tab_strip_focus_swipe_controller.h"
+@@ -268,6 +270,17 @@ VerticalTabStripRegionView::VerticalTabStripRegionView(
+   const int region_horizontal_padding =
+       GetLayoutConstant(LayoutConstant::kVerticalTabStripHorizontalPadding);
+ 
++  // Sora: Zen's workspaces. The indicator row with the active workspace sits
++  // right above "+ New tab", as in Zen (essentials, indicator, "+ New tab",
++  // tabs); Sora's essentials grid stays inside the tab strip below them.
++  sora_workspaces_ = std::make_unique<SoraWorkspacesController>(
++      browser_view->browser(), state_controller_);
++  sora_workspace_indicator_ = content_area_view_->AddChildView(
++      std::make_unique<SoraWorkspaceIndicator>(sora_workspaces_->GetWeakPtr()));
++  sora_workspace_indicator_->SetProperty(
++      views::kMarginsKey, gfx::Insets::VH(0, region_horizontal_padding));
++  sora_workspaces_->SetEditorAnchor(sora_workspace_indicator_);
++
+   // Sora: "+ New tab" heads the tab list, as in Zen. It shows while the strip
+   // is expanded; collapsed, the bottom container's new tab button is used.
+   // The row is shown and hidden through a holder because action updates reset
+@@ -321,6 +334,13 @@ VerticalTabStripRegionView::VerticalTabStripRegionView(
+   gemini_button_ =
+       content_area_view_->AddChildView(std::make_unique<views::View>());
+ 
++  // Sora: the workspace icons and "+" go into the footer.
++  bottom_button_container_->SetSoraWorkspaces(sora_workspaces_->GetWeakPtr());
++  sora_workspaces_subscription_ =
++      sora_workspaces_->RegisterOnChanged(base::BindRepeating(
++          &VerticalTabStripRegionView::OnSoraWorkspacesChanged,
++          base::Unretained(this)));
++
+   // Views that go into the content area above
+   // --------------
+ 
+@@ -1081,6 +1101,9 @@ void VerticalTabStripRegionView::OnCollapseStateChanged(
+   // Sora: swap the "+ New tab" row with the bottom new tab button, and show or
+   // hide the top button row along with the sidebar toolbar.
+   sora_new_tab_row_->SetVisible(!collapsed);
++  // Sora: Zen shows the workspace indicator only in the expanded sidebar.
++  sora_workspace_indicator_->SetVisible(
++      !collapsed && sora_workspace_indicator_->HasWorkspace());
+   InvalidateLayout();
+ 
+   if ((state == tabs::VerticalTabStripCollapseState::kCollapsing) ||
+@@ -1109,6 +1132,14 @@ void VerticalTabStripRegionView::OnCollapseStateChanged(
+   }
+ }
+ 
++void VerticalTabStripRegionView::OnSoraWorkspacesChanged() {
++  sora_workspace_indicator_->Update();
++  sora_workspace_indicator_->SetVisible(
++      !state_controller_->IsCollapsed() &&
++      sora_workspace_indicator_->HasWorkspace());
++  bottom_button_container_->UpdateSoraWorkspaces();
++}
++
+ bool VerticalTabStripRegionView::IsCollapseButtonHovered() const {
+   // Sora: the footer's collapse toggle counts too.
+   if (bottom_button_container_) {
+diff --git a/chrome/browser/ui/views/frame/vertical_tab_strip_region_view.h b/chrome/browser/ui/views/frame/vertical_tab_strip_region_view.h
+index f98a09a..9279485 100644
+--- a/chrome/browser/ui/views/frame/vertical_tab_strip_region_view.h
++++ b/chrome/browser/ui/views/frame/vertical_tab_strip_region_view.h
+@@ -38,6 +38,8 @@
+ #include "ui/views/layout/delegating_layout_manager.h"
+ 
+ class BrowserView;
++class SoraWorkspaceIndicator;
++class SoraWorkspacesController;
+ class VerticalTabStripTopContainer;
+ class VerticalTabStripBottomContainer;
+ class VerticalTabStripFocusSwipeController;
+@@ -220,6 +222,8 @@ class VerticalTabStripRegionView final
+ 
+   void OnExpandOnHoverEnabledChanged(bool enabled);
+ 
++  // Sora: workspaces changed; refreshes the indicator and the footer icons.
++  void OnSoraWorkspacesChanged();
+   // Sora: compact mode, see IsSoraCompactMode().
+   void OnSoraCompactModeChanged();
+   void UpdateSoraCompactReveal(std::optional<bool> hovered);
+@@ -256,6 +260,12 @@ class VerticalTabStripRegionView final
+   raw_ptr<views::View> content_area_view_ = nullptr;
+   raw_ptr<VerticalTabStripTopContainer> top_button_container_ = nullptr;
+   raw_ptr<views::Separator> top_button_separator_ = nullptr;
++  // Sora: Zen's workspaces (sora_workspaces_controller.h) and the indicator
++  // row above "+ New tab". Views reach the controller through weak pointers,
++  // since it goes away before the child views do.
++  std::unique_ptr<SoraWorkspacesController> sora_workspaces_;
++  base::CallbackListSubscription sora_workspaces_subscription_;
++  raw_ptr<SoraWorkspaceIndicator> sora_workspace_indicator_ = nullptr;
+   // Sora: holder of Zen's "+ New tab" row at the top of the tab list.
+   raw_ptr<views::View> sora_new_tab_row_ = nullptr;
+   base::CallbackListSubscription sora_new_tab_row_pressed_subscription_;
+diff --git a/chrome/browser/ui/views/tabs/common/tab_group_view_layout.cc b/chrome/browser/ui/views/tabs/common/tab_group_view_layout.cc
+index 8116e7a..60404ef 100644
+--- a/chrome/browser/ui/views/tabs/common/tab_group_view_layout.cc
++++ b/chrome/browser/ui/views/tabs/common/tab_group_view_layout.cc
+@@ -68,7 +68,11 @@ views::ProposedLayout TabGroupViewLayout::CalculateVerticalLayout(
+     const views::SizeBounds& size_bounds) const {
+   views::ProposedLayout layouts;
+   int width = 0;
+-  int height = kGroupHeaderVerticalMargin;
++  // Sora: the focused group is the active workspace. Its name and color are in
++  // the workspace indicator above the list (sora_workspace_views.h), so the
++  // group shows only its tabs: no unfocus chip, header or margin above them.
++  const bool sora_workspace = tab_group_view->IsGroupFocused();
++  int height = sora_workspace ? 0 : kGroupHeaderVerticalMargin;
+   auto tab_strip_collapse_state = tab_group_view->GetTabStripCollapseState();
+ 
+   gfx::Rect header_bounds;
+@@ -86,7 +90,7 @@ views::ProposedLayout TabGroupViewLayout::CalculateVerticalLayout(
+   }
+ 
+   if (tab_group_view->unfocus_header_) {
+-    if (tab_group_view->IsGroupFocused()) {
++    if (tab_group_view->IsGroupFocused() && !sora_workspace) {
+       gfx::Rect unfocus_bounds;
+       unfocus_bounds.set_x(header_bounds.x());
+       unfocus_bounds.set_y(height);
+@@ -115,11 +119,16 @@ views::ProposedLayout TabGroupViewLayout::CalculateVerticalLayout(
+ 
+   layouts.child_layouts.emplace_back(
+       tab_group_view->group_header_.get(),
+-      tab_group_view->group_header_->GetVisible(), header_bounds);
+-
+-  height +=
+-      header_bounds.height() + kGroupHeaderVerticalMargin + kTabVerticalPadding;
+-  width = std::max(width, header_bounds.width());
++      // Sora: once hidden here, GetVisible() is the layout's choice, so ask
++      // whether the header may be visible instead.
++      CanBeVisible(tab_group_view->group_header_.get()) && !sora_workspace,
++      header_bounds);
++
++  if (!sora_workspace) {
++    height += header_bounds.height() + kGroupHeaderVerticalMargin +
++              kTabVerticalPadding;
++    width = std::max(width, header_bounds.width());
++  }
+ 
+   // If the tab strip is not collapsed then the group line is below and left
+   // aligned with the header.
+diff --git a/chrome/browser/ui/views/tabs/vertical/BUILD.gn b/chrome/browser/ui/views/tabs/vertical/BUILD.gn
+index c924c0c..fc77b21 100644
+--- a/chrome/browser/ui/views/tabs/vertical/BUILD.gn
++++ b/chrome/browser/ui/views/tabs/vertical/BUILD.gn
+@@ -7,6 +7,8 @@ import("//chrome/common/features.gni")
+ 
+ source_set("vertical") {
+   sources = [
++    "sora_workspace_views.h",
++    "sora_workspaces_controller.h",
+     "top_container_button.h",
+     "vertical_tab_strip_bottom_container.h",
+     "vertical_tab_strip_expand_on_hover_lock.h",
+@@ -16,7 +18,13 @@ source_set("vertical") {
+     "vertical_tab_strip_top_container.h",
+   ]
+ 
+-  public_deps = [ "//chrome/browser/ui/views/tabs/common" ]
++  public_deps = [
++    "//chrome/browser/ui/tabs:tab_strip_model_observer",
++    "//chrome/browser/ui/views/tabs/common",
++    "//chrome/browser/ui/views/tabs/groups",
++    "//components/tab_groups",
++    "//components/tabs:public",
++  ]
+ 
+   deps = [
+     "//base",
+@@ -37,6 +45,8 @@ source_set("vertical") {
+ 
+ source_set("impl") {
+   sources = [
++    "sora_workspace_views.cc",
++    "sora_workspaces_controller.cc",
+     "top_container_button.cc",
+     "vertical_tab_strip_bottom_container.cc",
+     "vertical_tab_strip_expand_on_hover_lock.cc",
+@@ -47,6 +57,7 @@ source_set("impl") {
+   ]
+ 
+   deps = [
++    "//cc/paint",
+     "//chrome/browser:primitives",
+     "//chrome/browser/glic",
+     "//chrome/browser/glic/browser_ui:glow",
+@@ -54,6 +65,7 @@ source_set("impl") {
+     "//chrome/browser/themes",
+     "//chrome/browser/ui:browser_commands",
+     "//chrome/browser/ui:browser_element_identifiers",
++    "//chrome/browser/ui:browser_tabstrip",
+     "//chrome/browser/ui:layout_constants",
+     "//chrome/browser/ui:ui_features",
+     "//chrome/browser/ui/actions:actions_headers",
+@@ -74,6 +86,7 @@ source_set("impl") {
+     "//chrome/browser/ui/views/tabs/common",
+     "//chrome/browser/ui/views/tabs/common:impl",
+     "//chrome/browser/ui/views/tabs/dragging:tab_drag_target",
++    "//chrome/browser/ui/views/tabs/groups",
+     "//chrome/browser/ui/views/tabs/organizer",
+     "//chrome/browser/ui/views/tabs/shared",
+     "//chrome/browser/ui/views/toolbar",
+@@ -82,6 +95,7 @@ source_set("impl") {
+     "//components/performance_manager",
+     "//components/tab_groups",
+     "//components/tabs:impl",
++    "//components/vector_icons",
+     "//content/public/browser",
+     "//skia",
+     "//third_party/abseil-cpp:absl",
+@@ -99,6 +113,7 @@ source_set("impl") {
+     "//ui/gfx",
+     "//ui/gfx/geometry",
+     "//ui/views",
++    "//url",
+   ]
+ 
+   public_deps = [
+diff --git a/chrome/browser/ui/views/tabs/vertical/sora_workspace_views.cc b/chrome/browser/ui/views/tabs/vertical/sora_workspace_views.cc
+new file mode 100644
+index 0000000..65d63f0
+--- /dev/null
++++ b/chrome/browser/ui/views/tabs/vertical/sora_workspace_views.cc
+@@ -0,0 +1,380 @@
++// Copyright 2026 The Sora Browser Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/ui/views/tabs/vertical/sora_workspace_views.h"
++
++#include <algorithm>
++#include <memory>
++#include <utility>
++
++#include "base/functional/bind.h"
++#include "base/numerics/safe_conversions.h"
++#include "cc/paint/paint_flags.h"
++#include "chrome/browser/ui/color/chrome_color_id.h"
++#include "chrome/browser/ui/layout_constants.h"
++#include "chrome/browser/ui/tabs/tab_group_theme.h"
++#include "chrome/browser/ui/views/tabs/vertical/sora_workspaces_controller.h"
++#include "components/tab_groups/tab_group_visual_data.h"
++#include "third_party/skia/include/core/SkColor.h"
++#include "ui/base/metadata/metadata_impl_macros.h"
++#include "ui/color/color_id.h"
++#include "ui/color/color_provider.h"
++#include "ui/events/event.h"
++#include "ui/gfx/canvas.h"
++#include "ui/gfx/color_utils.h"
++#include "ui/gfx/font.h"
++#include "ui/gfx/font_list.h"
++#include "ui/gfx/geometry/insets.h"
++#include "ui/gfx/geometry/point_f.h"
++#include "ui/gfx/geometry/rect.h"
++#include "ui/gfx/geometry/rect_f.h"
++#include "ui/gfx/text_constants.h"
++#include "ui/views/controls/focus_ring.h"
++#include "ui/views/controls/highlight_path_generator.h"
++#include "ui/views/controls/label.h"
++#include "ui/views/layout/box_layout.h"
++#include "ui/views/view_utils.h"
++#include "ui/views/widget/widget.h"
++
++namespace {
++
++// Workspace indicator (sora/zen-spec.md, section 3; zen-workspaces.css,
++// .zen-current-workspace-indicator).
++constexpr int kSoraIndicatorHeight = 44;
++// Zen measures the text start from the sidebar edge (3px + 8px tab padding +
++// 5px sidebar padding) and the end padding as 12px. The row sits inside the
++// strip's horizontal padding, so that padding is taken off.
++constexpr int kSoraIndicatorLeadingPadding = 16;
++constexpr int kSoraIndicatorTrailingPadding = 12;
++constexpr int kSoraIndicatorIconSize = 16;
++// --toolbarbutton-inner-padding (8px [FF]) - 1px.
++constexpr int kSoraIndicatorIconGap = 7;
++// Name in 13px ("font-size: small") at weight 600; the UI font is 12px.
++constexpr int kSoraIndicatorNameSizeDelta = 1;
++// Hover backplate: 4px in from the top and bottom, the tab radius (14px
++// squircle, ~6px round), the tab hover color.
++constexpr int kSoraIndicatorBackplateVerticalInset = 4;
++constexpr float kSoraIndicatorBackplateRadius = 6.0f;
++
++// Footer workspace icons (zen-workspaces.css, #zen-workspaces-button).
++constexpr int kSoraWorkspaceButtonSize = 30;
++constexpr float kSoraWorkspaceButtonRadius = 6.0f;
++constexpr int kSoraWorkspaceButtonGap = 4;  // 0.5ch.
++// A workspace without an icon shows a dot. Sora has no workspace icons yet,
++// so the dot is drawn for every workspace, in the workspace color.
++constexpr float kSoraWorkspaceDotDiameter = 8.0f;
++// Inactive icons: grayscale at 70% opacity.
++constexpr float kSoraInactiveWorkspaceOpacity = 0.7f;
++
++bool ShouldPaintAsActive(const views::View* view) {
++  const views::Widget* widget = view->GetWidget();
++  return !widget || widget->ShouldPaintAsActive();
++}
++
++// The workspace color as the tab strip draws its groups.
++SkColor GetWorkspaceColor(const views::View* view,
++                          tab_groups::TabGroupColorId color) {
++  return view->GetColorProvider()->GetColor(
++      GetTabGroupTabStripColorId(color, ShouldPaintAsActive(view)));
++}
++
++void PaintDot(gfx::Canvas* canvas, const gfx::PointF& center, SkColor color) {
++  cc::PaintFlags flags;
++  flags.setAntiAlias(true);
++  flags.setStyle(cc::PaintFlags::kFill_Style);
++  flags.setColor(color);
++  canvas->DrawCircle(center, kSoraWorkspaceDotDiameter / 2, flags);
++}
++
++// One footer icon.
++class SoraWorkspaceButton : public views::Button {
++  METADATA_HEADER(SoraWorkspaceButton, views::Button)
++
++ public:
++  SoraWorkspaceButton(base::WeakPtr<SoraWorkspacesController> controller,
++                      const tab_groups::TabGroupId& workspace)
++      : views::Button(base::BindRepeating(&SoraWorkspaceButton::OnPressed,
++                                          base::Unretained(this))),
++        controller_(std::move(controller)),
++        workspace_(workspace) {
++    SetTriggerableEventFlags(ui::EF_LEFT_MOUSE_BUTTON |
++                             ui::EF_RIGHT_MOUSE_BUTTON);
++    views::InstallRoundRectHighlightPathGenerator(
++        this, gfx::Insets(), static_cast<int>(kSoraWorkspaceButtonRadius));
++    views::FocusRing::Install(this);
++  }
++  SoraWorkspaceButton(const SoraWorkspaceButton&) = delete;
++  SoraWorkspaceButton& operator=(const SoraWorkspaceButton&) = delete;
++  ~SoraWorkspaceButton() override = default;
++
++  // Updated in place, so that an editor bubble anchored here survives a
++  // rename.
++  void SetData(const std::u16string& name,
++               tab_groups::TabGroupColorId color,
++               bool active) {
++    if (name != name_) {
++      name_ = name;
++      SetTooltipText(name);
++      GetViewAccessibility().SetName(name);
++    }
++    color_ = color;
++    active_ = active;
++    SchedulePaint();
++  }
++
++  // views::View:
++  gfx::Size CalculatePreferredSize(
++      const views::SizeBounds& available_size) const override {
++    return gfx::Size(kSoraWorkspaceButtonSize, kSoraWorkspaceButtonSize);
++  }
++
++ protected:
++  // views::Button:
++  void PaintButtonContents(gfx::Canvas* canvas) override {
++    const bool hovered =
++        GetState() == STATE_HOVERED || GetState() == STATE_PRESSED;
++    if (hovered) {
++      // Hover: --zen-toolbar-element-bg, which Sora maps to the subtle
++      // toolbar emphasis color (color-mixer.patch).
++      cc::PaintFlags flags;
++      flags.setAntiAlias(true);
++      flags.setColor(GetColorProvider()->GetColor(
++          kColorToolbarBackgroundSubtleEmphasis));
++      canvas->DrawRoundRect(gfx::RectF(GetLocalBounds()),
++                            kSoraWorkspaceButtonRadius, flags);
++    }
++    SkColor dot_color = GetWorkspaceColor(this, color_);
++    if (!active_ && !hovered) {
++      const uint8_t luma = color_utils::GetLuma(dot_color);
++      dot_color = SkColorSetARGB(
++          base::ClampRound<uint8_t>(SkColorGetA(dot_color) *
++                                    kSoraInactiveWorkspaceOpacity),
++          luma, luma, luma);
++    }
++    PaintDot(canvas, gfx::RectF(GetLocalBounds()).CenterPoint(), dot_color);
++  }
++
++ private:
++  void OnPressed(const ui::Event& event) {
++    if (!controller_) {
++      return;
++    }
++    if (event.IsMouseEvent() && event.AsMouseEvent()->IsRightMouseButton()) {
++      controller_->ShowEditor(workspace_, this);
++      return;
++    }
++    controller_->SwitchTo(workspace_);
++  }
++
++  base::WeakPtr<SoraWorkspacesController> controller_;
++  const tab_groups::TabGroupId workspace_;
++  std::u16string name_;
++  tab_groups::TabGroupColorId color_ = tab_groups::TabGroupColorId::kGrey;
++  bool active_ = false;
++};
++
++BEGIN_METADATA(SoraWorkspaceButton)
++END_METADATA
++
++}  // namespace
++
++// SoraWorkspaceIndicator ------------------------------------------------------
++
++SoraWorkspaceIndicator::SoraWorkspaceIndicator(
++    base::WeakPtr<SoraWorkspacesController> controller)
++    : views::Button(base::BindRepeating(&SoraWorkspaceIndicator::OnPressed,
++                                        base::Unretained(this))),
++      controller_(std::move(controller)) {
++  SetTriggerableEventFlags(ui::EF_LEFT_MOUSE_BUTTON |
++                           ui::EF_RIGHT_MOUSE_BUTTON);
++  name_label_ = AddChildView(std::make_unique<views::Label>());
++  name_label_->SetFontList(gfx::FontList()
++                               .DeriveWithSizeDelta(kSoraIndicatorNameSizeDelta)
++                               .DeriveWithWeight(gfx::Font::Weight::SEMIBOLD));
++  name_label_->SetHorizontalAlignment(gfx::ALIGN_LEFT);
++  name_label_->SetElideBehavior(gfx::ELIDE_TAIL);
++  name_label_->SetAutoColorReadabilityEnabled(false);
++  name_label_->SetCanProcessEventsWithinSubtree(false);
++  // The backplate is see-through, as with the "+ New tab" row.
++  name_label_->SetSubpixelRenderingEnabled(false);
++
++  views::InstallRoundRectHighlightPathGenerator(
++      this, gfx::Insets::VH(kSoraIndicatorBackplateVerticalInset, 0),
++      static_cast<int>(kSoraIndicatorBackplateRadius));
++  views::FocusRing::Install(this);
++  Update();
++}
++
++SoraWorkspaceIndicator::~SoraWorkspaceIndicator() = default;
++
++void SoraWorkspaceIndicator::Update() {
++  std::optional<tab_groups::TabGroupId> workspace =
++      controller_ ? controller_->GetActiveWorkspace() : std::nullopt;
++  const tab_groups::TabGroupVisualData* visual_data =
++      workspace ? controller_->GetVisualData(*workspace) : nullptr;
++  if (!visual_data) {
++    workspace.reset();
++  }
++  workspace_ = workspace;
++  if (!workspace_) {
++    return;
++  }
++  const std::u16string name = controller_->GetDisplayName(*workspace_);
++  color_ = visual_data->color();
++  if (name_label_->GetText() != name) {
++    name_label_->SetText(name);
++    SetTooltipText(name);
++    GetViewAccessibility().SetName(name);
++  }
++  SchedulePaint();
++}
++
++gfx::Size SoraWorkspaceIndicator::CalculatePreferredSize(
++    const views::SizeBounds& available_size) const {
++  return gfx::Size(0, kSoraIndicatorHeight);
++}
++
++void SoraWorkspaceIndicator::Layout(PassKey) {
++  LayoutSuperclass<views::Button>(this);
++  const int strip_padding =
++      GetLayoutConstant(LayoutConstant::kVerticalTabStripHorizontalPadding);
++  const int leading =
++      std::max(0, kSoraIndicatorLeadingPadding - strip_padding) +
++      kSoraIndicatorIconSize + kSoraIndicatorIconGap;
++  const int trailing =
++      std::max(0, kSoraIndicatorTrailingPadding - strip_padding);
++  // Child bounds are logical; views mirrors them in RTL.
++  gfx::Rect label_bounds = GetLocalBounds();
++  label_bounds.Inset(gfx::Insets::TLBR(0, leading, 0, trailing));
++  name_label_->SetBoundsRect(label_bounds);
++}
++
++void SoraWorkspaceIndicator::OnThemeChanged() {
++  views::Button::OnThemeChanged();
++  UpdateColors();
++}
++
++void SoraWorkspaceIndicator::AddedToWidget() {
++  views::Button::AddedToWidget();
++  paint_as_active_subscription_ =
++      GetWidget()->RegisterPaintAsActiveChangedCallback(base::BindRepeating(
++          &SoraWorkspaceIndicator::UpdateColors, base::Unretained(this)));
++}
++
++void SoraWorkspaceIndicator::RemovedFromWidget() {
++  paint_as_active_subscription_ = {};
++  views::Button::RemovedFromWidget();
++}
++
++void SoraWorkspaceIndicator::PaintButtonContents(gfx::Canvas* canvas) {
++  if (!workspace_) {
++    return;
++  }
++  const bool active_frame = ShouldPaintAsActive(this);
++  if (GetState() == STATE_HOVERED || GetState() == STATE_PRESSED) {
++    cc::PaintFlags flags;
++    flags.setAntiAlias(true);
++    flags.setColor(GetColorProvider()->GetColor(
++        active_frame ? kColorTabBackgroundInactiveHoverFrameActive
++                     : kColorTabBackgroundInactiveHoverFrameInactive));
++    gfx::RectF backplate(GetLocalBounds());
++    backplate.Inset(
++        gfx::InsetsF::VH(kSoraIndicatorBackplateVerticalInset, 0));
++    canvas->DrawRoundRect(backplate, kSoraIndicatorBackplateRadius, flags);
++  }
++  const int strip_padding =
++      GetLayoutConstant(LayoutConstant::kVerticalTabStripHorizontalPadding);
++  // Painting is not flipped in RTL, so the icon slot is mirrored here.
++  const gfx::Rect icon_bounds = GetMirroredRect(gfx::Rect(
++      std::max(0, kSoraIndicatorLeadingPadding - strip_padding),
++      (height() - kSoraIndicatorIconSize) / 2, kSoraIndicatorIconSize,
++      kSoraIndicatorIconSize));
++  PaintDot(canvas, gfx::RectF(icon_bounds).CenterPoint(),
++           GetWorkspaceColor(this, color_));
++}
++
++void SoraWorkspaceIndicator::OnPressed() {
++  if (controller_ && workspace_) {
++    controller_->ShowEditor(*workspace_, this);
++  }
++}
++
++void SoraWorkspaceIndicator::UpdateColors() {
++  if (!GetColorProvider()) {
++    return;
++  }
++  const ui::ColorId text_color = ShouldPaintAsActive(this)
++                                    ? kColorTabForegroundInactiveFrameActive
++                                    : kColorTabForegroundInactiveFrameInactive;
++  name_label_->SetEnabledColor(text_color);
++  SchedulePaint();
++}
++
++BEGIN_METADATA(SoraWorkspaceIndicator)
++END_METADATA
++
++// SoraWorkspaceSwitcher -------------------------------------------------------
++
++SoraWorkspaceSwitcher::SoraWorkspaceSwitcher(
++    base::WeakPtr<SoraWorkspacesController> controller)
++    : controller_(std::move(controller)) {
++  SetLayoutManager(std::make_unique<views::BoxLayout>(
++      views::BoxLayout::Orientation::kHorizontal, gfx::Insets(),
++      kSoraWorkspaceButtonGap));
++  Update();
++}
++
++SoraWorkspaceSwitcher::~SoraWorkspaceSwitcher() = default;
++
++void SoraWorkspaceSwitcher::Update() {
++  std::vector<Entry> entries;
++  if (controller_) {
++    const std::optional<tab_groups::TabGroupId> active =
++        controller_->GetActiveWorkspace();
++    for (const tab_groups::TabGroupId& id : controller_->GetWorkspaces()) {
++      const tab_groups::TabGroupVisualData* visual_data =
++          controller_->GetVisualData(id);
++      if (!visual_data) {
++        continue;
++      }
++      entries.push_back({id, controller_->GetDisplayName(id),
++                         visual_data->color(), id == active});
++    }
++  }
++  if (entries == entries_) {
++    return;
++  }
++  const bool same_workspaces = std::ranges::equal(
++      entries, entries_, {}, &Entry::id, &Entry::id);
++  entries_ = std::move(entries);
++  if (!same_workspaces) {
++    RemoveAllChildViews();
++    for (const Entry& entry : entries_) {
++      AddChildView(
++          std::make_unique<SoraWorkspaceButton>(controller_, entry.id));
++    }
++    PreferredSizeChanged();
++  }
++  for (size_t i = 0; i < entries_.size(); ++i) {
++    auto* const button =
++        views::AsViewClass<SoraWorkspaceButton>(children()[i]);
++    if (button) {
++      button->SetData(entries_[i].name, entries_[i].color, entries_[i].active);
++    }
++  }
++}
++
++bool SoraWorkspaceSwitcher::IsPointOnButton(const gfx::Point& point) const {
++  for (const views::View* child : children()) {
++    gfx::Point point_in_child = point;
++    views::View::ConvertPointToTarget(this, child, &point_in_child);
++    if (child->GetVisible() && child->HitTestPoint(point_in_child)) {
++      return true;
++    }
++  }
++  return false;
++}
++
++BEGIN_METADATA(SoraWorkspaceSwitcher)
++END_METADATA
+diff --git a/chrome/browser/ui/views/tabs/vertical/sora_workspace_views.h b/chrome/browser/ui/views/tabs/vertical/sora_workspace_views.h
+new file mode 100644
+index 0000000..307ab05
+--- /dev/null
++++ b/chrome/browser/ui/views/tabs/vertical/sora_workspace_views.h
+@@ -0,0 +1,103 @@
++// Copyright 2026 The Sora Browser Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_UI_VIEWS_TABS_VERTICAL_SORA_WORKSPACE_VIEWS_H_
++#define CHROME_BROWSER_UI_VIEWS_TABS_VERTICAL_SORA_WORKSPACE_VIEWS_H_
++
++#include <optional>
++#include <string>
++#include <vector>
++
++#include "base/callback_list.h"
++#include "base/memory/raw_ptr.h"
++#include "base/memory/weak_ptr.h"
++#include "components/tab_groups/tab_group_color.h"
++#include "components/tab_groups/tab_group_id.h"
++#include "ui/base/metadata/metadata_header_macros.h"
++#include "ui/views/controls/button/button.h"
++#include "ui/views/view.h"
++
++class SoraWorkspacesController;
++
++namespace views {
++class Label;
++}  // namespace views
++
++// Sora: Zen's workspace indicator, the row above "+ New tab" with the active
++// workspace's icon and name (sora/zen-spec.md, section 3). Sora workspaces
++// have no emoji yet, so the icon is a dot in the workspace color. Clicking it
++// opens the workspace editor (rename, color, delete).
++class SoraWorkspaceIndicator : public views::Button {
++  METADATA_HEADER(SoraWorkspaceIndicator, views::Button)
++
++ public:
++  explicit SoraWorkspaceIndicator(
++      base::WeakPtr<SoraWorkspacesController> controller);
++  SoraWorkspaceIndicator(const SoraWorkspaceIndicator&) = delete;
++  SoraWorkspaceIndicator& operator=(const SoraWorkspaceIndicator&) = delete;
++  ~SoraWorkspaceIndicator() override;
++
++  // Whether there is an active workspace to show.
++  bool HasWorkspace() const { return workspace_.has_value(); }
++
++  // Re-reads the active workspace from the controller.
++  void Update();
++
++  // views::View:
++  gfx::Size CalculatePreferredSize(
++      const views::SizeBounds& available_size) const override;
++  void Layout(PassKey) override;
++  void OnThemeChanged() override;
++  void AddedToWidget() override;
++  void RemovedFromWidget() override;
++
++ protected:
++  // views::Button:
++  void PaintButtonContents(gfx::Canvas* canvas) override;
++
++ private:
++  void OnPressed();
++  void UpdateColors();
++
++  base::WeakPtr<SoraWorkspacesController> controller_;
++  std::optional<tab_groups::TabGroupId> workspace_;
++  tab_groups::TabGroupColorId color_ = tab_groups::TabGroupColorId::kGrey;
++  raw_ptr<views::Label> name_label_ = nullptr;
++  base::CallbackListSubscription paint_as_active_subscription_;
++};
++
++// Sora: the workspace icons of Zen's sidebar footer, one button per workspace
++// (sora/zen-spec.md, section 3). Click switches to the workspace, right-click
++// opens its editor.
++class SoraWorkspaceSwitcher : public views::View {
++  METADATA_HEADER(SoraWorkspaceSwitcher, views::View)
++
++ public:
++  explicit SoraWorkspaceSwitcher(
++      base::WeakPtr<SoraWorkspacesController> controller);
++  SoraWorkspaceSwitcher(const SoraWorkspaceSwitcher&) = delete;
++  SoraWorkspaceSwitcher& operator=(const SoraWorkspaceSwitcher&) = delete;
++  ~SoraWorkspaceSwitcher() override;
++
++  // Rebuilds the buttons if the workspaces, their names or colors, or the
++  // active one changed.
++  void Update();
++
++  // Whether `point` (in this view's coordinates) is on a workspace button.
++  bool IsPointOnButton(const gfx::Point& point) const;
++
++ private:
++  struct Entry {
++    tab_groups::TabGroupId id;
++    std::u16string name;
++    tab_groups::TabGroupColorId color;
++    bool active;
++    bool operator==(const Entry&) const = default;
++  };
++
++  base::WeakPtr<SoraWorkspacesController> controller_;
++  std::vector<Entry> entries_;
++};
++
++#endif  // CHROME_BROWSER_UI_VIEWS_TABS_VERTICAL_SORA_WORKSPACE_VIEWS_H_
+diff --git a/chrome/browser/ui/views/tabs/vertical/sora_workspaces_controller.cc b/chrome/browser/ui/views/tabs/vertical/sora_workspaces_controller.cc
+new file mode 100644
+index 0000000..cd876b0
+--- /dev/null
++++ b/chrome/browser/ui/views/tabs/vertical/sora_workspaces_controller.cc
+@@ -0,0 +1,367 @@
++// Copyright 2026 The Sora Browser Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/ui/views/tabs/vertical/sora_workspaces_controller.h"
++
++#include <algorithm>
++#include <utility>
++
++#include "base/feature_list.h"
++#include "base/functional/bind.h"
++#include "base/location.h"
++#include "base/task/single_thread_task_runner.h"
++#include "base/time/time.h"
++#include "chrome/browser/ui/browser_tabstrip.h"
++#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
++#include "chrome/browser/ui/tabs/tab_group_model.h"
++#include "chrome/browser/ui/tabs/tab_strip_model.h"
++#include "chrome/browser/ui/tabs/tab_strip_model_delegate.h"
++#include "chrome/browser/ui/ui_features.h"
++#include "chrome/browser/ui/views/tabs/groups/tab_group_editor_bubble_view.h"
++#include "components/tab_groups/tab_group_visual_data.h"
++#include "components/tabs/public/tab_group.h"
++#include "content/public/browser/web_contents.h"
++#include "ui/views/view.h"
++#include "ui/views/widget/widget.h"
++#include "url/gurl.h"
++
++namespace {
++
++// Zen names new workspaces "Space" (ZenSpaceManager.mjs,
++// createAndSaveWorkspace). Sora has no string resources yet.
++// TODO(sora): move to a Sora .grd once there is one.
++constexpr char16_t kSoraDefaultWorkspaceName[] = u"Space";
++
++// While a tab drag is in progress the strip cannot be edited; check again
++// after this delay.
++constexpr base::TimeDelta kSoraRetryDelay = base::Milliseconds(250);
++
++}  // namespace
++
++SoraWorkspacesController::SoraWorkspacesController(
++    BrowserWindowInterface* browser,
++    tabs::VerticalTabStripStateController* state_controller)
++    : browser_(browser),
++      model_(browser->GetTabStripModel()),
++      editor_bubble_tracker_(state_controller) {
++  model_->AddObserver(this);
++  ScheduleUpdate();
++}
++
++SoraWorkspacesController::~SoraWorkspacesController() {
++  if (model_) {
++    model_->RemoveObserver(this);
++  }
++}
++
++bool SoraWorkspacesController::IsEnabled() const {
++  // EnterFocusMode() CHECKs this feature. Sora turns it on by default
++  // (ui_features.cc); someone may still turn it off in chrome://flags.
++  return model_ && model_->SupportsTabGroups() &&
++         base::FeatureList::IsEnabled(features::kTabGroupsFocusing);
++}
++
++std::vector<tab_groups::TabGroupId> SoraWorkspacesController::GetWorkspaces()
++    const {
++  if (!IsEnabled()) {
++    return {};
++  }
++  TabGroupModel* const group_model = model_->group_model();
++  std::vector<tab_groups::TabGroupId> workspaces;
++  for (const tab_groups::TabGroupId& group : group_model->ListTabGroups()) {
++    // Ephemeral groups only back Chromium's "focus tabs" mode; they are not
++    // workspaces.
++    if (!model_->IsEphemeralTabGroup(group) &&
++        !group_model->GetTabGroup(group)->IsEmpty()) {
++      workspaces.push_back(group);
++    }
++  }
++  // Same order as FocusNextTabGroup() and the strip: by first tab.
++  std::ranges::sort(workspaces, {}, [&](const tab_groups::TabGroupId& id) {
++    return group_model->GetTabGroup(id)->ListTabs().start();
++  });
++  return workspaces;
++}
++
++std::optional<tab_groups::TabGroupId>
++SoraWorkspacesController::GetActiveWorkspace() const {
++  if (!IsEnabled()) {
++    return std::nullopt;
++  }
++  std::optional<tab_groups::TabGroupId> focused = model_->GetFocusedGroup();
++  if (focused && model_->IsEphemeralTabGroup(*focused)) {
++    return std::nullopt;
++  }
++  return focused;
++}
++
++const tab_groups::TabGroupVisualData* SoraWorkspacesController::GetVisualData(
++    const tab_groups::TabGroupId& workspace) const {
++  if (!IsEnabled() || !model_->group_model()->ContainsTabGroup(workspace)) {
++    return nullptr;
++  }
++  return model_->group_model()->GetTabGroup(workspace)->visual_data();
++}
++
++std::u16string SoraWorkspacesController::GetDisplayName(
++    const tab_groups::TabGroupId& workspace) const {
++  const tab_groups::TabGroupVisualData* visual_data = GetVisualData(workspace);
++  if (!visual_data || visual_data->title().empty()) {
++    return kSoraDefaultWorkspaceName;
++  }
++  return visual_data->title();
++}
++
++void SoraWorkspacesController::SwitchTo(
++    const tab_groups::TabGroupId& workspace) {
++  if (!IsEnabled() || !model_->group_model()->ContainsTabGroup(workspace) ||
++      GetActiveWorkspace() == workspace) {
++    return;
++  }
++  ExpandIfCollapsed(workspace);
++  last_workspace_ = workspace;
++  // Selecting a tab outside the focused group ends focus mode, and entering
++  // focus mode for a group whose tab is already active keeps that tab.
++  if (tabs::TabInterface* tab = GetTabToSelect(workspace)) {
++    model_->ActivateTab(
++        tab, TabStripUserGestureDetails(
++                 TabStripUserGestureDetails::GestureType::kOther));
++  }
++  if (model_->group_model()->ContainsTabGroup(workspace)) {
++    model_->EnterFocusMode(workspace);
++  }
++}
++
++void SoraWorkspacesController::CreateWorkspace(
++    views::View* fallback_anchor_view) {
++  if (!IsEnabled()) {
++    return;
++  }
++  // Out of focus mode the new tab is not put in the focused group, and
++  // appended at the end it does not join the last group either.
++  model_->ExitFocusMode();
++  content::WebContents* const contents = chrome::AddAndReturnTabAt(
++      browser_, GURL(), /*index=*/-1, /*foreground=*/true);
++  int index = contents ? model_->GetIndexOfWebContents(contents)
++                       : TabStripModel::kNoTab;
++  if (index == TabStripModel::kNoTab || model_->IsTabPinned(index)) {
++    ScheduleUpdate();
++    return;
++  }
++  if (model_->GetTabGroupForTab(index).has_value()) {
++    model_->RemoveFromGroup({index});
++    // Leaving the group may move the tab.
++    index = model_->GetIndexOfWebContents(contents);
++  }
++  // The new group gets the next unused color, like any new tab group.
++  const tab_groups::TabGroupId workspace = model_->AddToNewGroup({index});
++  SetTitle(workspace, kSoraDefaultWorkspaceName);
++  last_workspace_ = workspace;
++  model_->EnterFocusMode(workspace);
++  // Zen opens a creation form to name the new space; Sora opens the group
++  // editor with the name field focused.
++  views::View* const anchor_view =
++      editor_anchor_.view() && editor_anchor_.view()->IsDrawn()
++          ? editor_anchor_.view()
++          : fallback_anchor_view;
++  ShowEditor(workspace, anchor_view);
++}
++
++void SoraWorkspacesController::SetEditorAnchor(views::View* anchor_view) {
++  editor_anchor_.SetView(anchor_view);
++}
++
++void SoraWorkspacesController::ShowEditor(
++    const tab_groups::TabGroupId& workspace,
++    views::View* anchor_view) {
++  if (!IsEnabled() || !anchor_view || editor_bubble_tracker_.is_open() ||
++      !model_->group_model()->ContainsTabGroup(workspace)) {
++    return;
++  }
++  std::unique_ptr<views::Widget> bubble = TabGroupEditorBubbleView::Show(
++      browser_, workspace, anchor_view, /*anchor_rect=*/std::nullopt,
++      /*stop_context_menu_propagation=*/false);
++  if (bubble) {
++    editor_bubble_tracker_.Opened(std::move(bubble));
++  }
++}
++
++base::CallbackListSubscription SoraWorkspacesController::RegisterOnChanged(
++    base::RepeatingClosure callback) {
++  return on_changed_callbacks_.Add(std::move(callback));
++}
++
++void SoraWorkspacesController::OnTabStripModelChanged(
++    TabStripModel* tab_strip_model,
++    const TabStripModelChange& change,
++    const TabStripSelectionChange& selection) {
++  if (selection.active_tab_changed() && selection.new_tab) {
++    if (std::optional<tab_groups::TabGroupId> group =
++            selection.new_tab->GetGroup()) {
++      last_active_tabs_[*group] = selection.new_tab->GetHandle();
++    }
++  }
++  ScheduleUpdate();
++}
++
++void SoraWorkspacesController::OnTabPinnedStateChanged(tabs::TabInterface* tab,
++                                                       int index) {
++  ScheduleUpdate();
++}
++
++void SoraWorkspacesController::TabGroupedStateChanged(
++    TabStripModel* tab_strip_model,
++    std::optional<tab_groups::TabGroupId> old_group,
++    std::optional<tab_groups::TabGroupId> new_group,
++    tabs::TabInterface* tab,
++    int index) {
++  ScheduleUpdate();
++}
++
++void SoraWorkspacesController::OnTabGroupChanged(const TabGroupChange& change) {
++  if (change.type == TabGroupChange::kClosed) {
++    last_active_tabs_.erase(change.group);
++  }
++  ScheduleUpdate();
++}
++
++void SoraWorkspacesController::OnTabGroupFocusChanged(
++    std::optional<tab_groups::TabGroupId> new_focused_group_id,
++    std::optional<tab_groups::TabGroupId> old_focused_group_id) {
++  if (new_focused_group_id) {
++    last_workspace_ = new_focused_group_id;
++  }
++  ScheduleUpdate();
++}
++
++void SoraWorkspacesController::OnTabStripModelDestroyed(
++    TabStripModel* tab_strip_model) {
++  model_->RemoveObserver(this);
++  model_ = nullptr;
++  weak_ptr_factory_.InvalidateWeakPtrs();
++}
++
++void SoraWorkspacesController::ScheduleUpdate(base::TimeDelta delay) {
++  if (update_pending_) {
++    return;
++  }
++  update_pending_ = true;
++  base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
++      FROM_HERE,
++      base::BindOnce(&SoraWorkspacesController::Update,
++                     weak_ptr_factory_.GetWeakPtr()),
++      delay);
++}
++
++void SoraWorkspacesController::Update() {
++  update_pending_ = false;
++  if (!model_) {
++    return;
++  }
++  if (!EnsureActiveWorkspace()) {
++    ScheduleUpdate(kSoraRetryDelay);
++  }
++  on_changed_callbacks_.Notify();
++}
++
++bool SoraWorkspacesController::EnsureActiveWorkspace() {
++  if (!IsEnabled() || model_->empty() || model_->closing_all() ||
++      !model_->delegate()->IsNormalWindow()) {
++    return true;
++  }
++  if (!model_->delegate()->IsTabStripEditable()) {
++    return false;
++  }
++  TabGroupModel* const group_model = model_->group_model();
++  std::optional<tab_groups::TabGroupId> target = model_->GetFocusedGroup();
++  if (target && model_->IsEphemeralTabGroup(*target)) {
++    // Chromium's "focus tabs" mode on ungrouped tabs; leave it alone.
++    return true;
++  }
++
++  if (!target) {
++    // Focus mode ended: the user selected a tab of another workspace, closed
++    // the last tab of the active one, or the window was just restored. As in
++    // Zen, the workspace of the selected tab becomes the active one.
++    tabs::TabInterface* const active_tab = model_->GetActiveTab();
++    if (active_tab && active_tab->GetGroup() &&
++        !model_->IsEphemeralTabGroup(*active_tab->GetGroup())) {
++      target = active_tab->GetGroup();
++    } else if (last_workspace_ &&
++               group_model->ContainsTabGroup(*last_workspace_)) {
++      target = last_workspace_;
++    } else if (std::vector<tab_groups::TabGroupId> workspaces =
++                   GetWorkspaces();
++               !workspaces.empty()) {
++      target = workspaces.front();
++    }
++  }
++
++  // Unpinned tabs without a workspace join the active one, as in Zen. This
++  // also turns the tabs of a window from before Sora had workspaces into the
++  // default workspace.
++  std::vector<int> loose_tabs;
++  for (int index = model_->IndexOfFirstNonPinnedTab(); index < model_->count();
++       ++index) {
++    if (!model_->GetTabGroupForTab(index).has_value()) {
++      loose_tabs.push_back(index);
++    }
++  }
++  if (!loose_tabs.empty()) {
++    if (target) {
++      model_->AddToExistingGroup(loose_tabs, *target);
++    } else {
++      target = model_->AddToNewGroup(loose_tabs);
++      SetTitle(*target, kSoraDefaultWorkspaceName);
++    }
++  }
++
++  // Only pinned tabs (essentials) are left: there is no group to focus, and
++  // the next unpinned tab starts the default workspace.
++  if (!target || !group_model->ContainsTabGroup(*target) ||
++      group_model->GetTabGroup(*target)->IsEmpty()) {
++    return true;
++  }
++  if (model_->GetFocusedGroup() != target) {
++    ExpandIfCollapsed(*target);
++    model_->EnterFocusMode(*target);
++  }
++  return true;
++}
++
++void SoraWorkspacesController::ExpandIfCollapsed(
++    const tab_groups::TabGroupId& workspace) {
++  const tab_groups::TabGroupVisualData* visual_data = GetVisualData(workspace);
++  if (!visual_data || !visual_data->is_collapsed()) {
++    return;
++  }
++  model_->ChangeTabGroupVisuals(
++      workspace,
++      tab_groups::TabGroupVisualData(visual_data->title(), visual_data->color(),
++                                     /*is_collapsed=*/false));
++}
++
++void SoraWorkspacesController::SetTitle(const tab_groups::TabGroupId& workspace,
++                                        const std::u16string& title) {
++  const tab_groups::TabGroupVisualData* visual_data = GetVisualData(workspace);
++  if (!visual_data) {
++    return;
++  }
++  model_->ChangeTabGroupVisuals(
++      workspace, tab_groups::TabGroupVisualData(title, visual_data->color(),
++                                                /*is_collapsed=*/false));
++}
++
++tabs::TabInterface* SoraWorkspacesController::GetTabToSelect(
++    const tab_groups::TabGroupId& workspace) {
++  if (auto it = last_active_tabs_.find(workspace);
++      it != last_active_tabs_.end()) {
++    tabs::TabInterface* const tab = it->second.Get();
++    if (tab && tab->GetGroup() == workspace &&
++        model_->GetIndexOfTab(tab) != TabStripModel::kNoTab) {
++      return tab;
++    }
++  }
++  return model_->group_model()->GetTabGroup(workspace)->GetFirstTab();
++}
+diff --git a/chrome/browser/ui/views/tabs/vertical/sora_workspaces_controller.h b/chrome/browser/ui/views/tabs/vertical/sora_workspaces_controller.h
+new file mode 100644
+index 0000000..fd2ee73
+--- /dev/null
++++ b/chrome/browser/ui/views/tabs/vertical/sora_workspaces_controller.h
+@@ -0,0 +1,149 @@
++// Copyright 2026 The Sora Browser Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_UI_VIEWS_TABS_VERTICAL_SORA_WORKSPACES_CONTROLLER_H_
++#define CHROME_BROWSER_UI_VIEWS_TABS_VERTICAL_SORA_WORKSPACES_CONTROLLER_H_
++
++#include <map>
++#include <optional>
++#include <string>
++#include <vector>
++
++#include "base/callback_list.h"
++#include "base/functional/callback_forward.h"
++#include "base/memory/raw_ptr.h"
++#include "base/memory/weak_ptr.h"
++#include "base/time/time.h"
++#include "chrome/browser/ui/tabs/tab_strip_model_observer.h"
++#include "chrome/browser/ui/views/tabs/groups/tab_group_editor_bubble_tracker.h"
++#include "components/tab_groups/tab_group_id.h"
++#include "components/tabs/public/tab_interface.h"
++#include "ui/views/view_tracker.h"
++
++class BrowserWindowInterface;
++class TabStripModel;
++
++namespace tab_groups {
++class TabGroupVisualData;
++}  // namespace tab_groups
++
++namespace tabs {
++class VerticalTabStripStateController;
++}  // namespace tabs
++
++namespace views {
++class View;
++}  // namespace views
++
++// Sora: Zen's workspaces ("Spaces", sora/zen-spec.md section 11) on top of
++// Chromium's tab group focus mode (features::kTabGroupsFocusing).
++//
++// A workspace is a tab group of the window and the active workspace is the
++// focused group. Focus mode already does the rest natively: the strip shows
++// only the focused group's tabs plus the pinned tabs (Sora's essentials),
++// new tabs join the focused group, tab cycling and Ctrl+1..8 stay inside it,
++// and the group color tints the window. Groups and their names and colors
++// persist through session restore, and the active workspace comes back as
++// the group of the restored active tab.
++//
++// This class keeps that state Zen-like: there is always an active workspace
++// while the window has unpinned tabs, tabs without a group join it, and
++// activating a tab of another workspace switches to that workspace instead of
++// leaving focus mode. Model changes are applied from a posted task, never
++// from inside a TabStripModel notification.
++class SoraWorkspacesController : public TabStripModelObserver {
++ public:
++  SoraWorkspacesController(
++      BrowserWindowInterface* browser,
++      tabs::VerticalTabStripStateController* state_controller);
++  SoraWorkspacesController(const SoraWorkspacesController&) = delete;
++  SoraWorkspacesController& operator=(const SoraWorkspacesController&) =
++      delete;
++  ~SoraWorkspacesController() override;
++
++  // Whether workspaces are available: focus mode is on and the window
++  // supports tab groups.
++  bool IsEnabled() const;
++
++  // The workspaces of the window, in strip order.
++  std::vector<tab_groups::TabGroupId> GetWorkspaces() const;
++  // The active (focused) workspace, if any.
++  std::optional<tab_groups::TabGroupId> GetActiveWorkspace() const;
++  // Visual data (name, color) of `workspace`, or nullptr if it is gone.
++  const tab_groups::TabGroupVisualData* GetVisualData(
++      const tab_groups::TabGroupId& workspace) const;
++  // The name to show for `workspace`: its group title, or the default name
++  // when the title is empty.
++  std::u16string GetDisplayName(const tab_groups::TabGroupId& workspace) const;
++
++  // Makes `workspace` active and selects the tab last used in it.
++  void SwitchTo(const tab_groups::TabGroupId& workspace);
++  // Creates a workspace holding a new tab, makes it active and opens the
++  // editor so it can be named. The editor is anchored to the view set with
++  // SetEditorAnchor() if it is showing, else to `fallback_anchor_view`.
++  void CreateWorkspace(views::View* fallback_anchor_view);
++  // The view the editor of a new workspace points at: the indicator.
++  void SetEditorAnchor(views::View* anchor_view);
++  // Opens Chromium's group editor (rename, color, delete) for `workspace`.
++  void ShowEditor(const tab_groups::TabGroupId& workspace,
++                  views::View* anchor_view);
++
++  // Runs `callback` after the workspaces or the active one change.
++  base::CallbackListSubscription RegisterOnChanged(
++      base::RepeatingClosure callback);
++
++  base::WeakPtr<SoraWorkspacesController> GetWeakPtr() {
++    return weak_ptr_factory_.GetWeakPtr();
++  }
++
++ private:
++  // TabStripModelObserver:
++  void OnTabStripModelChanged(
++      TabStripModel* tab_strip_model,
++      const TabStripModelChange& change,
++      const TabStripSelectionChange& selection) override;
++  void OnTabPinnedStateChanged(tabs::TabInterface* tab, int index) override;
++  void TabGroupedStateChanged(TabStripModel* tab_strip_model,
++                              std::optional<tab_groups::TabGroupId> old_group,
++                              std::optional<tab_groups::TabGroupId> new_group,
++                              tabs::TabInterface* tab,
++                              int index) override;
++  void OnTabGroupChanged(const TabGroupChange& change) override;
++  void OnTabGroupFocusChanged(
++      std::optional<tab_groups::TabGroupId> new_focused_group_id,
++      std::optional<tab_groups::TabGroupId> old_focused_group_id) override;
++  void OnTabStripModelDestroyed(TabStripModel* tab_strip_model) override;
++
++  // Posts one Update() for any number of changes.
++  void ScheduleUpdate(base::TimeDelta delay = base::TimeDelta());
++  void Update();
++  // Restores the invariants described above. Returns false if the strip
++  // cannot be edited now (a drag is in progress) and should be retried.
++  bool EnsureActiveWorkspace();
++  // Expands `workspace` if it was collapsed: its header is hidden, so a
++  // collapsed workspace could never show its tabs.
++  void ExpandIfCollapsed(const tab_groups::TabGroupId& workspace);
++  void SetTitle(const tab_groups::TabGroupId& workspace,
++                const std::u16string& title);
++  // The tab to select when switching to `workspace`.
++  tabs::TabInterface* GetTabToSelect(const tab_groups::TabGroupId& workspace);
++
++  const raw_ptr<BrowserWindowInterface> browser_;
++  raw_ptr<TabStripModel> model_ = nullptr;
++
++  // Last active tab of each workspace, as Zen's lastSelectedWorkspaceTabs.
++  std::map<tab_groups::TabGroupId, tabs::TabHandle> last_active_tabs_;
++  // The workspace that was active last, kept while the active tab is pinned
++  // or ungrouped.
++  std::optional<tab_groups::TabGroupId> last_workspace_;
++
++  bool update_pending_ = false;
++  base::RepeatingClosureList on_changed_callbacks_;
++  TabGroupEditorBubbleTracker editor_bubble_tracker_;
++  views::ViewTracker editor_anchor_;
++
++  base::WeakPtrFactory<SoraWorkspacesController> weak_ptr_factory_{this};
++};
++
++#endif  // CHROME_BROWSER_UI_VIEWS_TABS_VERTICAL_SORA_WORKSPACES_CONTROLLER_H_
+diff --git a/chrome/browser/ui/views/tabs/vertical/vertical_tab_strip_bottom_container.cc b/chrome/browser/ui/views/tabs/vertical/vertical_tab_strip_bottom_container.cc
+index ccae811..550df70 100644
+--- a/chrome/browser/ui/views/tabs/vertical/vertical_tab_strip_bottom_container.cc
++++ b/chrome/browser/ui/views/tabs/vertical/vertical_tab_strip_bottom_container.cc
+@@ -12,9 +12,15 @@
+ #include "chrome/browser/ui/views/frame/browser_view.h"
+ #include "chrome/browser/ui/views/tabs/shared/new_tab_button.h"
+ #include "chrome/browser/ui/views/tabs/shared/tab_strip_flat_edge_button.h"
++#include "chrome/browser/ui/views/tabs/vertical/sora_workspace_views.h"
++#include "chrome/browser/ui/views/tabs/vertical/sora_workspaces_controller.h"
+ #include "chrome/browser/ui/views/tabs/vertical/top_container_button.h"
++#include "components/vector_icons/vector_icons.h"
+ #include "ui/actions/actions.h"
+ #include "ui/base/metadata/metadata_impl_macros.h"
++#include "ui/base/models/image_model.h"
++#include "ui/base/ui_base_features.h"
++#include "ui/color/color_id.h"
+ #include "ui/gfx/geometry/insets.h"
+ #include "ui/gfx/geometry/size.h"
+ #include "ui/views/actions/action_view_controller.h"
+@@ -31,6 +37,10 @@ namespace {
+ constexpr int kSoraFooterButtonSize = 28;
+ constexpr int kSoraFooterIconSize = 16;
+ constexpr int kSoraFooterButtonRadius = 4;
++// Sora: tooltip of the footer's "+". Zen's is "Create Space"; Sora has no
++// string resources yet.
++// TODO(sora): move to a Sora .grd once there is one.
++constexpr char16_t kSoraNewWorkspaceTooltip[] = u"New space";
+ }  // namespace
+ 
+ VerticalTabStripBottomContainer::VerticalTabStripBottomContainer(
+@@ -112,6 +122,7 @@ bool VerticalTabStripBottomContainer::IsPositionInWindowCaption(
+     if (child == sora_footer_) {
+       for (views::View* footer_button :
+            {static_cast<views::View*>(sora_downloads_button_.get()),
++            static_cast<views::View*>(sora_new_workspace_button_.get()),
+             static_cast<views::View*>(sora_collapse_button_.get())}) {
+         gfx::Point point_in_button = point;
+         if (footer_button && footer_button->GetVisible()) {
+@@ -122,6 +133,14 @@ bool VerticalTabStripBottomContainer::IsPositionInWindowCaption(
+           }
+         }
+       }
++      if (sora_workspace_switcher_ && sora_workspace_switcher_->GetVisible()) {
++        gfx::Point point_in_switcher = point;
++        views::View::ConvertPointToTarget(this, sora_workspace_switcher_,
++                                          &point_in_switcher);
++        if (sora_workspace_switcher_->IsPointOnButton(point_in_switcher)) {
++          return false;
++        }
++      }
+       continue;
+     }
+     gfx::Point point_in_child = point;
+@@ -200,6 +219,68 @@ views::LabelButton* VerticalTabStripBottomContainer::AddSoraFooterButton(
+   return sora_footer_->AddChildView(std::move(button));
+ }
+ 
++void VerticalTabStripBottomContainer::SetSoraWorkspaces(
++    base::WeakPtr<SoraWorkspacesController> workspaces) {
++  if (sora_workspace_switcher_ || !workspaces || !workspaces->IsEnabled()) {
++    return;
++  }
++  sora_workspaces_ = workspaces;
++
++  // Zen's footer: library, workspace icons, "+". Sora keeps downloads in
++  // place of the library and the collapse toggle at the end:
++  // downloads | <flex> | icons | <flex> | + | collapse.
++  size_t index = sora_footer_->children().size();
++  if (sora_collapse_button_) {
++    index = sora_footer_->GetIndexOf(sora_collapse_button_).value_or(index);
++  }
++  auto switcher = std::make_unique<SoraWorkspaceSwitcher>(workspaces);
++  switcher->SetProperty(
++      views::kFlexBehaviorKey,
++      views::FlexSpecification(views::MinimumFlexSizeRule::kScaleToZero,
++                               views::MaximumFlexSizeRule::kPreferred));
++  sora_workspace_switcher_ =
++      sora_footer_->AddChildViewAt(std::move(switcher), index++);
++  sora_footer_
++      ->AddChildViewAt(std::make_unique<views::View>(), index++)
++      ->SetProperty(
++          views::kFlexBehaviorKey,
++          views::FlexSpecification(views::MinimumFlexSizeRule::kScaleToZero,
++                                   views::MaximumFlexSizeRule::kUnbounded));
++
++  auto new_workspace_button = std::make_unique<TopContainerButton>();
++  new_workspace_button->SetIconSize(kSoraFooterIconSize);
++  new_workspace_button->SetPreferredSize(
++      gfx::Size(kSoraFooterButtonSize, kSoraFooterButtonSize));
++  views::InstallRoundRectHighlightPathGenerator(
++      new_workspace_button.get(), gfx::Insets(), kSoraFooterButtonRadius);
++  // Same icon as the new tab action.
++  new_workspace_button->UpdateIcon(ui::ImageModel::FromVectorIcon(
++      features::IsRoundedIconsEnabled() ? vector_icons::kAddWeight500CustomIcon
++                                        : vector_icons::kAddOldIcon,
++      ui::kColorIcon));
++  new_workspace_button->SetTooltipText(kSoraNewWorkspaceTooltip);
++  new_workspace_button->GetViewAccessibility().SetName(
++      kSoraNewWorkspaceTooltip);
++  views::LabelButton* const new_workspace_button_ptr =
++      new_workspace_button.get();
++  new_workspace_button->SetCallback(base::BindRepeating(
++      [](base::WeakPtr<SoraWorkspacesController> workspaces,
++         views::View* button) {
++        if (workspaces) {
++          workspaces->CreateWorkspace(button);
++        }
++      },
++      workspaces, base::Unretained(new_workspace_button_ptr)));
++  sora_new_workspace_button_ =
++      sora_footer_->AddChildViewAt(std::move(new_workspace_button), index);
++}
++
++void VerticalTabStripBottomContainer::UpdateSoraWorkspaces() {
++  if (sora_workspace_switcher_) {
++    sora_workspace_switcher_->Update();
++  }
++}
++
+ void VerticalTabStripBottomContainer::UpdateSoraFooterVisibility() {
+   sora_footer_->SetVisible(sora_footer_mode_);
+   new_tab_button_->SetVisible(
+diff --git a/chrome/browser/ui/views/tabs/vertical/vertical_tab_strip_bottom_container.h b/chrome/browser/ui/views/tabs/vertical/vertical_tab_strip_bottom_container.h
+index a2104b4..967e77b 100644
+--- a/chrome/browser/ui/views/tabs/vertical/vertical_tab_strip_bottom_container.h
++++ b/chrome/browser/ui/views/tabs/vertical/vertical_tab_strip_bottom_container.h
+@@ -9,12 +9,15 @@
+ 
+ #include "base/callback_list.h"
+ #include "base/memory/raw_ptr.h"
++#include "base/memory/weak_ptr.h"
+ #include "ui/actions/action_id.h"
+ #include "ui/base/metadata/metadata_header_macros.h"
+ #include "ui/views/layout/flex_layout_view.h"
+ 
+ class BrowserWindowInterface;
+ class ExpandOnHoverLock;
++class SoraWorkspaceSwitcher;
++class SoraWorkspacesController;
+ class TabStripFlatEdgeButton;
+ 
+ namespace actions {
+@@ -49,6 +52,12 @@ class VerticalTabStripBottomContainer : public views::FlexLayoutView {
+   // Sora: the footer's collapse toggle, or nullptr.
+   views::LabelButton* GetSoraCollapseButton() { return sora_collapse_button_; }
+ 
++  // Sora: adds Zen's workspace icons and "+" to the footer, between the
++  // downloads and collapse buttons.
++  void SetSoraWorkspaces(base::WeakPtr<SoraWorkspacesController> workspaces);
++  // Sora: refreshes the workspace icons.
++  void UpdateSoraWorkspaces();
++
+  private:
+   void OnNewTabButtonContextMenuWillShow();
+   void OnNewTabButtonContextMenuClosed();
+@@ -77,6 +86,10 @@ class VerticalTabStripBottomContainer : public views::FlexLayoutView {
+   raw_ptr<views::FlexLayoutView> sora_footer_ = nullptr;
+   raw_ptr<views::LabelButton> sora_downloads_button_ = nullptr;
+   raw_ptr<views::LabelButton> sora_collapse_button_ = nullptr;
++  // Sora: workspaces, see SetSoraWorkspaces().
++  base::WeakPtr<SoraWorkspacesController> sora_workspaces_;
++  raw_ptr<SoraWorkspaceSwitcher> sora_workspace_switcher_ = nullptr;
++  raw_ptr<views::LabelButton> sora_new_workspace_button_ = nullptr;
+   raw_ptr<actions::ActionItem> sora_new_tab_action_ = nullptr;
+   base::CallbackListSubscription sora_new_tab_action_subscription_;
+ };

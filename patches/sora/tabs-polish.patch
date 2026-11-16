@@ -1,0 +1,1061 @@
+diff --git a/chrome/browser/ui/views/frame/vertical_tab_strip_region_view.cc b/chrome/browser/ui/views/frame/vertical_tab_strip_region_view.cc
+index a084acd..2c7de0f 100644
+--- a/chrome/browser/ui/views/frame/vertical_tab_strip_region_view.cc
++++ b/chrome/browser/ui/views/frame/vertical_tab_strip_region_view.cc
+@@ -17,6 +17,7 @@
+ #include "base/metrics/user_metrics_action.h"
+ #include "base/numerics/safe_conversions.h"
+ #include "base/time/time.h"
++#include "cc/paint/paint_flags.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/ui/actions/chrome_action_id.h"
+ #include "chrome/browser/ui/animation/browser_animation_controller.h"
+@@ -73,16 +74,21 @@
+ #include "ui/base/metadata/metadata_impl_macros.h"
+ #include "ui/color/color_provider.h"
+ #include "ui/compositor/layer.h"
++#include "ui/compositor/layer_animator.h"
+ #include "ui/compositor/scoped_layer_animation_settings.h"
+ #include "ui/display/screen.h"
+ #include "ui/events/event.h"
+ #include "ui/gfx/animation/tween.h"
++#include "ui/gfx/canvas.h"
+ #include "ui/gfx/font_list.h"
+ #include "ui/gfx/geometry/insets.h"
+ #include "ui/gfx/geometry/point.h"
+ #include "ui/gfx/geometry/rect_f.h"
+ #include "ui/gfx/geometry/transform.h"
+ #include "ui/gfx/geometry/transform_util.h"
++#include "ui/views/animation/animation_builder.h"
++#include "ui/views/animation/ink_drop.h"
++#include "ui/views/animation/ink_drop_host.h"
+ #include "ui/views/controls/button/label_button.h"
+ #include "ui/views/controls/focus_ring.h"
+ #include "ui/views/controls/resize_area.h"
+@@ -156,6 +162,8 @@ constexpr base::TimeDelta kSoraNewTabRowPressDuration = base::Milliseconds(100);
+ // Sora: the shared NewTabButton (same action, metrics and context menu) drawn
+ // as a tab-like row: transparent until hovered, icon and label at the leading
+ // edge, label at 70% of the tab text color, and a slight shrink while pressed.
++// Hovered or pressed, it paints the tab hover color (Zen's 7% veil) under its
++// contents instead of the tab strip control ink drop (tabs-polish.patch).
+ class SoraNewTabRow : public shared::NewTabButton {
+   METADATA_HEADER(SoraNewTabRow, shared::NewTabButton)
+ 
+@@ -168,6 +176,8 @@ class SoraNewTabRow : public shared::NewTabButton {
+             static_cast<float>(
+                 GetLayoutConstant(LayoutConstant::kVerticalTabCornerRadius))) {
+     SetPaintTransparent(true);
++    // Sora: no ink drop; OnPaintBackground() draws the hover veil instead.
++    views::InkDrop::Get(this)->SetMode(views::InkDropHost::InkDropMode::OFF);
+     SetHorizontalAlignment(gfx::ALIGN_LEFT);
+     SetInsets(gfx::Insets::VH(0, kSoraNewTabRowPadding));
+     SetImageLabelSpacing(kSoraNewTabRowIconLabelSpacing);
+@@ -202,6 +212,26 @@ class SoraNewTabRow : public shared::NewTabButton {
+                                               kSoraNewTabRowLabelOpacity))));
+   }
+ 
++  // Sora: the tab hover color (the 7% veil of sora_color_mixer.cc) while
++  // hovered or pressed, in the tab's shape. Button::SetState() repaints on
++  // every state change.
++  void OnPaintBackground(gfx::Canvas* canvas) override {
++    if (GetState() != STATE_HOVERED && GetState() != STATE_PRESSED) {
++      return;
++    }
++    const bool frame_active =
++        GetWidget() && GetWidget()->ShouldPaintAsActive();
++    cc::PaintFlags flags;
++    flags.setAntiAlias(true);
++    flags.setStyle(cc::PaintFlags::kFill_Style);
++    flags.setColor(GetColorProvider()->GetColor(
++        frame_active ? kColorTabBackgroundInactiveHoverFrameActive
++                     : kColorTabBackgroundInactiveHoverFrameInactive));
++    canvas->DrawRoundRect(
++        gfx::RectF(GetLocalBounds()),
++        GetLayoutConstant(LayoutConstant::kVerticalTabCornerRadius), flags);
++  }
++
+  protected:
+   // views::Button:
+   void StateChanged(ButtonState old_state) override {
+@@ -223,6 +253,134 @@ class SoraNewTabRow : public shared::NewTabButton {
+ BEGIN_METADATA(SoraNewTabRow)
+ END_METADATA
+ 
++// Sora: Zen's sidebar splitter (sora/zen-spec.md, section 1;
++// #zen-sidebar-splitter in zen-browser-ui.css). The handle is the resize
++// area's full width (kResizeAreaWidth, 5px like --zen-toolbox-padding), inset
++// 8px (--zen-element-separation) from the top and bottom.
++constexpr int kSoraResizeHandleVerticalInset = 8;
++constexpr float kSoraResizeHandleRadius = 4.0f;
++// Invisible at rest; 0.8 on hover or while dragging, after a 0.2s delay.
++// Hiding has no delay. Both fade with 0.2s ease-in-out.
++constexpr float kSoraResizeHandleVisibleOpacity = 0.8f;
++constexpr base::TimeDelta kSoraResizeHandleShowDelay = base::Milliseconds(200);
++constexpr base::TimeDelta kSoraResizeHandleFadeDuration =
++    base::Milliseconds(200);
++constexpr gfx::Tween::Type kSoraResizeHandleFadeTween = gfx::Tween::EASE_IN_OUT;
++
++// Sora: the strip's resize area, drawn as Zen's splitter: an accent-colored
++// rounded bar that fades in while hovered, focused or dragged. Double-click
++// runs `on_double_click` (back to the default width, as in Zen).
++class SoraResizeArea : public views::ResizeArea {
++  METADATA_HEADER(SoraResizeArea, views::ResizeArea)
++
++ public:
++  SoraResizeArea(views::ResizeAreaDelegate* delegate,
++                 base::RepeatingClosure on_double_click)
++      : views::ResizeArea(delegate),
++        on_double_click_(std::move(on_double_click)) {
++    SetPaintToLayer();
++    layer()->SetFillsBoundsOpaquely(false);
++    layer()->SetOpacity(0.0f);
++  }
++  SoraResizeArea(const SoraResizeArea&) = delete;
++  SoraResizeArea& operator=(const SoraResizeArea&) = delete;
++  ~SoraResizeArea() override = default;
++
++  // views::ResizeArea:
++  bool OnMousePressed(const ui::MouseEvent& event) override {
++    if (event.IsOnlyLeftMouseButton() &&
++        (event.flags() & ui::EF_IS_DOUBLE_CLICK)) {
++      on_double_click_.Run();
++      return true;
++    }
++    return views::ResizeArea::OnMousePressed(event);
++  }
++  bool OnMouseDragged(const ui::MouseEvent& event) override {
++    const bool handled = views::ResizeArea::OnMouseDragged(event);
++    UpdateHandle();
++    return handled;
++  }
++  void OnMouseReleased(const ui::MouseEvent& event) override {
++    views::ResizeArea::OnMouseReleased(event);
++    UpdateHandle();
++  }
++  void OnMouseCaptureLost() override {
++    views::ResizeArea::OnMouseCaptureLost();
++    UpdateHandle();
++  }
++  void OnGestureEvent(ui::GestureEvent* event) override {
++    views::ResizeArea::OnGestureEvent(event);
++    UpdateHandle();
++  }
++
++  // views::View:
++  void OnMouseEntered(const ui::MouseEvent& event) override {
++    views::ResizeArea::OnMouseEntered(event);
++    UpdateHandle();
++  }
++  void OnMouseExited(const ui::MouseEvent& event) override {
++    views::ResizeArea::OnMouseExited(event);
++    UpdateHandle();
++  }
++  void OnFocus() override {
++    views::ResizeArea::OnFocus();
++    UpdateHandle();
++  }
++  void OnBlur() override {
++    views::ResizeArea::OnBlur();
++    UpdateHandle();
++  }
++  void OnPaint(gfx::Canvas* canvas) override {
++    views::ResizeArea::OnPaint(canvas);
++    // Zen has no splitter on the collapsed strip, whose resize area is
++    // narrower (kCollapsedResizeAreaWidth).
++    if (width() < kResizeAreaWidth) {
++      return;
++    }
++    gfx::RectF handle_bounds(GetLocalBounds());
++    handle_bounds.Inset(gfx::InsetsF::VH(kSoraResizeHandleVerticalInset, 0));
++    if (handle_bounds.IsEmpty()) {
++      return;
++    }
++    // --zen-accent-button-background (frame-polish.patch).
++    cc::PaintFlags flags;
++    flags.setAntiAlias(true);
++    flags.setStyle(cc::PaintFlags::kFill_Style);
++    flags.setColor(
++        GetColorProvider()->GetColor(kColorSoraAccentButtonBackground));
++    canvas->DrawRoundRect(handle_bounds, kSoraResizeHandleRadius, flags);
++  }
++
++ private:
++  void UpdateHandle() {
++    const bool show = IsMouseHovered() || is_resizing() || HasFocus();
++    if (show == handle_shown_) {
++      return;
++    }
++    handle_shown_ = show;
++    views::AnimationBuilder builder;
++    builder.SetPreemptionStrategy(
++        ui::LayerAnimator::IMMEDIATELY_ANIMATE_TO_NEW_TARGET);
++    if (show) {
++      builder.Once()
++          .At(kSoraResizeHandleShowDelay)
++          .SetDuration(kSoraResizeHandleFadeDuration)
++          .SetOpacity(layer(), kSoraResizeHandleVisibleOpacity,
++                      kSoraResizeHandleFadeTween);
++    } else {
++      builder.Once()
++          .SetDuration(kSoraResizeHandleFadeDuration)
++          .SetOpacity(layer(), 0.0f, kSoraResizeHandleFadeTween);
++    }
++  }
++
++  base::RepeatingClosure on_double_click_;
++  bool handle_shown_ = false;
++};
++
++BEGIN_METADATA(SoraResizeArea)
++END_METADATA
++
+ }  // namespace
+ 
+ DEFINE_CLASS_CUSTOM_ELEMENT_EVENT_TYPE(VerticalTabStripRegionView,
+@@ -345,7 +503,10 @@ VerticalTabStripRegionView::VerticalTabStripRegionView(
+   // Views that go into the content area above
+   // --------------
+ 
+-  resize_area_ = AddChildView(std::make_unique<views::ResizeArea>(this));
++  // Sora: Zen's splitter look, and double-click back to the default width.
++  resize_area_ = AddChildView(std::make_unique<SoraResizeArea>(
++      this, base::BindRepeating(&VerticalTabStripRegionView::ResetSoraWidth,
++                                base::Unretained(this))));
+   resize_area_->SetProperty(views::kViewIgnoredByLayoutKey, true);
+   resize_area_->SetFocusBehavior(views::View::FocusBehavior::ACCESSIBLE_ONLY);
+   views::FocusRing::Install(resize_area_);
+@@ -1168,6 +1329,20 @@ bool VerticalTabStripRegionView::IsCollapseButtonHovered() const {
+       .value_or(false);
+ }
+ 
++void VerticalTabStripRegionView::ResetSoraWidth() {
++  // OnResize() takes the change from the current width, clamps and saves it,
++  // as for a drag released at the default width.
++  if (!tab_strip_view() || state_controller_->IsCollapsed() ||
++      IsAnimatingSize() || resize_area_->is_resizing()) {
++    return;
++  }
++  const int resize_amount =
++      tabs::kVerticalTabStripDefaultUncollapsedWidth - width();
++  if (resize_amount != 0) {
++    OnResize(resize_amount, /*done_resizing=*/true);
++  }
++}
++
+ bool VerticalTabStripRegionView::IsSoraToolbarInSidebar() const {
+   // Same test as the toolbar: an expanded strip outside fullscreen, where the
+   // browser layout puts the top container in the sidebar column, or at the
+diff --git a/chrome/browser/ui/views/frame/vertical_tab_strip_region_view.h b/chrome/browser/ui/views/frame/vertical_tab_strip_region_view.h
+index 0d2fbe7..0a28686 100644
+--- a/chrome/browser/ui/views/frame/vertical_tab_strip_region_view.h
++++ b/chrome/browser/ui/views/frame/vertical_tab_strip_region_view.h
+@@ -229,6 +229,9 @@ class VerticalTabStripRegionView final
+ 
+   // Sora: workspaces changed; refreshes the indicator and the footer icons.
+   void OnSoraWorkspacesChanged();
++  // Sora: double-click on the resize handle; back to the default width
++  // (tabs::kVerticalTabStripDefaultUncollapsedWidth), as in Zen.
++  void ResetSoraWidth();
+   // Sora: compact mode, see IsSoraCompactMode().
+   void OnSoraCompactModeChanged();
+   void UpdateSoraCompactReveal(std::optional<bool> hovered);
+diff --git a/chrome/browser/ui/views/tabs/common/tab_collection_animating_layout_manager.cc b/chrome/browser/ui/views/tabs/common/tab_collection_animating_layout_manager.cc
+index 86331af..e36e303 100644
+--- a/chrome/browser/ui/views/tabs/common/tab_collection_animating_layout_manager.cc
++++ b/chrome/browser/ui/views/tabs/common/tab_collection_animating_layout_manager.cc
+@@ -10,11 +10,16 @@
+ #include "base/check_deref.h"
+ #include "base/containers/flat_map.h"
+ #include "base/containers/flat_set.h"
++#include "base/time/time.h"
+ #include "third_party/abseil-cpp/absl/container/inlined_vector.h"
+ #include "ui/base/class_property.h"
+ #include "ui/compositor/layer.h"
+ #include "ui/gfx/animation/animation.h"
+ #include "ui/gfx/animation/tween.h"
++#include "ui/gfx/geometry/rect_f.h"
++#include "ui/gfx/geometry/size_f.h"
++#include "ui/gfx/geometry/transform.h"
++#include "ui/gfx/geometry/transform_util.h"
+ #include "ui/views/controls/scroll_view.h"
+ #include "ui/views/view.h"
+ #include "ui/views/view_class_properties.h"
+@@ -25,6 +30,7 @@ DEFINE_UI_CLASS_PROPERTY_TYPE(
+     TabCollectionAnimatingLayoutManager::SourceLayoutInfo*)
+ 
+ DEFINE_UI_CLASS_PROPERTY_KEY(bool, kHasAnimatingLayoutManagerKey, false)
++DEFINE_UI_CLASS_PROPERTY_KEY(bool, kSoraKeepLayerKey, false)
+ 
+ namespace {
+ 
+@@ -43,6 +49,48 @@ DEFINE_OWNED_UI_CLASS_PROPERTY_KEY(
+     TabCollectionAnimatingLayoutManager::SourceLayoutInfo,
+     kSourceLayoutInfo)
+ 
++// Sora: Zen's tab open and close animations (sora/zen-spec.md, section 8):
++// opacity 0 -> 1 and scale 0.95 -> 1 in 0.12s to open, opacity 1 -> 0 and
++// scale 1 -> 0.95 in 0.1s to close. They ride the shared layout animation
++// (kLayoutAnimationDuration, which also grows or shrinks the row the way Zen
++// animates the margin), finishing at Zen's time into it.
++// Chromium's 200ms, named so that both stay in step.
++constexpr base::TimeDelta kLayoutAnimationDuration = base::Milliseconds(200);
++constexpr base::TimeDelta kSoraTabOpenDuration = base::Milliseconds(120);
++constexpr base::TimeDelta kSoraTabCloseDuration = base::Milliseconds(100);
++constexpr float kSoraTabAddRemoveMinScale = 0.95f;
++
++// Sora: how far a Zen animation of `duration` is at `value` of the layout
++// animation.
++double GetSoraAddRemoveProgress(double value, base::TimeDelta duration) {
++  return std::min(1.0, value * (kLayoutAnimationDuration / duration));
++}
++
++// Sora: fades and scales `view` (which paints to a layer) about the center of
++// `bounds` (its bounds this frame); `shown` is 0 for gone, 1 for at rest.
++void SetSoraAddRemoveState(views::View* view,
++                           const gfx::Rect& bounds,
++                           double shown) {
++  view->layer()->SetOpacity(static_cast<float>(shown));
++  const float scale =
++      gfx::Tween::FloatValueBetween(shown, kSoraTabAddRemoveMinScale, 1.0f);
++  view->layer()->SetTransform(
++      scale == 1.0f
++          ? gfx::Transform()
++          : gfx::TransformAboutPivot(
++                gfx::RectF(gfx::SizeF(bounds.size())).CenterPoint(),
++                gfx::Transform::MakeScale(scale)));
++}
++
++// Sora: undoes SetSoraAddRemoveState() on a view that is staying, unless the
++// view keeps its layer for its own transform (kSoraKeepLayerKey).
++void ResetSoraAddRemoveTransform(views::View* view) {
++  if (view->layer() && !view->GetProperty(kSoraKeepLayerKey) &&
++      !view->layer()->transform().IsIdentity()) {
++    view->layer()->SetTransform(gfx::Transform());
++  }
++}
++
+ }  // namespace
+ 
+ bool TabCollectionAnimatingLayoutManager::Delegate::IsDragging() const {
+@@ -75,7 +123,7 @@ TabCollectionAnimatingLayoutManager::AnimationCoordinator::AnimationCoordinator(
+     views::View& view)
+     : views::AnimationDelegateViews(&view) {
+   animation_.SetSlideDuration(
+-      gfx::Animation::RichAnimationDuration(base::Milliseconds(200)));
++      gfx::Animation::RichAnimationDuration(kLayoutAnimationDuration));
+   animation_.SetTweenType(gfx::Tween::EASE_IN_OUT);
+ }
+ 
+@@ -131,7 +179,7 @@ void TabCollectionAnimatingLayoutManager::AnimationCoordinator::
+     }
+     animation_.Reset(0.0);
+     animation_.SetSlideDuration(
+-        gfx::Animation::RichAnimationDuration(base::Milliseconds(200)));
++        gfx::Animation::RichAnimationDuration(kLayoutAnimationDuration));
+     animation_.Show();
+   } else {
+     // We are still early in the animation. Simply update the starting offset
+@@ -678,6 +726,8 @@ views::ProposedLayout TabCollectionAnimatingLayoutManager::InterpolateLayout(
+         if (child_view->layer() && (child_view->layer()->opacity() != 1.0f)) {
+           child_view->layer()->SetOpacity(1.0f);
+         }
++        // Sora: same for the open and close scale.
++        ResetSoraAddRemoveTransform(child_view);
+       } else if (auto start_it = start_view_layout_map_.find(child_view);
+                  start_it != start_view_layout_map_.end()) {
+         // Moved child.
+@@ -692,6 +742,8 @@ views::ProposedLayout TabCollectionAnimatingLayoutManager::InterpolateLayout(
+         if (child_view->layer() && (child_view->layer()->opacity() != 1.0f)) {
+           child_view->layer()->SetOpacity(1.0f);
+         }
++        // Sora: same for the open and close scale.
++        ResetSoraAddRemoveTransform(child_view);
+       } else if (!delegate_->ShouldSnapToTarget(*child_view)) {
+         // Added child.
+         // Animate-in new Views from empty bounds.
+@@ -719,7 +771,11 @@ views::ProposedLayout TabCollectionAnimatingLayoutManager::InterpolateLayout(
+           interpolated_child.bounds = host_offsets.InterpolateChildBounds(
+               value, initial_bounds, target_it->second.bounds);
+           if (child_view->layer()) {
+-            child_view->layer()->SetOpacity(static_cast<float>(value));
++            // Sora: Zen's open animation (fade and scale) instead of the
++            // fade alone.
++            SetSoraAddRemoveState(
++                child_view, interpolated_child.bounds,
++                GetSoraAddRemoveProgress(value, kSoraTabOpenDuration));
+           }
+         }
+       } else {
+@@ -765,7 +821,11 @@ views::ProposedLayout TabCollectionAnimatingLayoutManager::InterpolateLayout(
+       interpolated_child.bounds = host_offsets.InterpolateChildBounds(
+           value, start_it->second.bounds, target_bounds);
+       if (child_view->layer()) {
+-        child_view->layer()->SetOpacity(static_cast<float>(1.0 - value));
++        // Sora: Zen's close animation (fade and scale) instead of the fade
++        // alone.
++        SetSoraAddRemoveState(
++            child_view, interpolated_child.bounds,
++            1.0 - GetSoraAddRemoveProgress(value, kSoraTabCloseDuration));
+       }
+ 
+       if (!interpolated_child.bounds.IsEmpty()) {
+@@ -990,7 +1050,11 @@ void TabCollectionAnimatingLayoutManager::ClearViewAnimationMetadata() {
+ 
+ void TabCollectionAnimatingLayoutManager::ClearViewAnimationMetadataForView(
+     views::View* view) {
+-  if (!delegate_->IsViewDragging(*view)) {
++  // Sora: views that hold their layer for their own transform (a pressed
++  // tab, tabs-polish.patch) keep it; the next clear after they let go drops
++  // it.
++  if (!delegate_->IsViewDragging(*view) &&
++      !view->GetProperty(kSoraKeepLayerKey)) {
+     view->DestroyLayer();
+   }
+   view->ClearProperty(kPreviousCollectionBounds);
+diff --git a/chrome/browser/ui/views/tabs/common/tab_collection_animating_layout_manager.h b/chrome/browser/ui/views/tabs/common/tab_collection_animating_layout_manager.h
+index 039c009..3673f1d 100644
+--- a/chrome/browser/ui/views/tabs/common/tab_collection_animating_layout_manager.h
++++ b/chrome/browser/ui/views/tabs/common/tab_collection_animating_layout_manager.h
+@@ -328,4 +328,9 @@ class TabCollectionAnimatingLayoutManager : public views::LayoutManagerBase {
+ 
+ extern const ui::ClassProperty<bool>* const kHasAnimatingLayoutManagerKey;
+ 
++// Sora: set on a child view that holds its layer for a transform of its own
++// (the pressed tab's scale, tabs-polish.patch), so that the manager does not
++// destroy the layer when it clears animation state. Cleared by that view.
++extern const ui::ClassProperty<bool>* const kSoraKeepLayerKey;
++
+ #endif  // CHROME_BROWSER_UI_VIEWS_TABS_COMMON_TAB_COLLECTION_ANIMATING_LAYOUT_MANAGER_H_
+diff --git a/chrome/browser/ui/views/tabs/common/tab_view.cc b/chrome/browser/ui/views/tabs/common/tab_view.cc
+index bd585d4..e73d38e 100644
+--- a/chrome/browser/ui/views/tabs/common/tab_view.cc
++++ b/chrome/browser/ui/views/tabs/common/tab_view.cc
+@@ -8,10 +8,12 @@
+ #include <optional>
+ #include <string>
+ 
++#include "base/functional/bind.h"
+ #include "base/functional/callback_helpers.h"
+ #include "base/metrics/histogram_functions.h"
+ #include "base/metrics/user_metrics.h"
+ #include "base/metrics/user_metrics_action.h"
++#include "base/numerics/safe_conversions.h"
+ #include "base/time/time.h"
+ #include "cc/paint/paint_filter.h"
+ #include "cc/paint/paint_flags.h"
+@@ -39,6 +41,7 @@
+ #include "chrome/browser/ui/views/frame/browser_frame_view.h"
+ #include "chrome/browser/ui/views/frame/themed_background.h"
+ #include "chrome/browser/ui/views/tabs/common/split_tab_view.h"
++#include "chrome/browser/ui/views/tabs/common/tab_collection_animating_layout_manager.h"
+ #include "chrome/browser/ui/views/tabs/common/tab_collection_node.h"
+ #include "chrome/browser/ui/views/tabs/common/tab_collection_z_order_manager.h"
+ #include "chrome/browser/ui/views/tabs/common/tab_drag_handler.h"
+@@ -69,6 +72,7 @@
+ #include "components/tabs/public/tab_collection_types.h"
+ #include "components/tabs/public/tab_interface.h"
+ #include "content/public/browser/navigation_controller.h"
++#include "third_party/skia/include/core/SkColor.h"
+ #include "third_party/skia/include/core/SkPath.h"
+ #include "third_party/skia/include/core/SkPathBuilder.h"
+ #include "third_party/skia/include/core/SkRRect.h"
+@@ -85,8 +89,10 @@
+ #include "ui/compositor/compositor.h"
+ #include "ui/color/color_provider.h"
+ #include "ui/compositor/layer.h"
++#include "ui/compositor/layer_animator.h"
+ #include "ui/events/keycodes/keyboard_codes.h"
+ #include "ui/events/types/event_type.h"
++#include "ui/gfx/animation/tween.h"
+ #include "ui/gfx/color_utils.h"
+ #include "ui/gfx/font_list.h"
+ #include "ui/gfx/geometry/insets.h"
+@@ -95,9 +101,12 @@
+ #include "ui/gfx/geometry/rounded_corners_f.h"
+ #include "ui/gfx/geometry/size.h"
+ #include "ui/gfx/geometry/skia_conversions.h"
++#include "ui/gfx/geometry/transform.h"
++#include "ui/gfx/geometry/transform_util.h"
+ #include "ui/gfx/image/image_skia.h"
+ #include "ui/gfx/scoped_canvas.h"
+ #include "ui/views/accessibility/view_accessibility.h"
++#include "ui/views/animation/animation_builder.h"
+ #include "ui/views/background.h"
+ #include "ui/views/border.h"
+ #include "ui/views/controls/button/button.h"
+@@ -123,6 +132,15 @@ constexpr float kEssentialsFaviconBlurSigma = 20.0f;
+ constexpr float kEssentialsSelectedCardInset = 2.0f;
+ constexpr float kEssentialsSelectedCardRadius = 5.0f;
+ 
++// Sora: Zen's pressed tab (sora/zen-spec.md, section 3): scale(0.98), 0.1s
++// ease (FAST_OUT_SLOW_IN is the closest curve to CSS `ease`).
++constexpr float kSoraTabPressedScale = 0.98f;
++constexpr base::TimeDelta kSoraTabPressDuration = base::Milliseconds(100);
++constexpr gfx::Tween::Type kSoraTabPressTween = gfx::Tween::FAST_OUT_SLOW_IN;
++// Sora: unloaded (discarded) tabs draw their title at 50%, like the favicon
++// (TabIcon::SetSoraZenStyle()).
++constexpr float kSoraDiscardedTitleOpacity = 0.5f;
++
+ class TabHighlightPathGenerator : public views::HighlightPathGenerator {
+  public:
+   explicit TabHighlightPathGenerator(TabView* tab_view) : tab_view_(tab_view) {}
+@@ -430,6 +448,13 @@ TabView::TabView(TabCollectionNode* collection_node)
+       tab_data_observer_->RegisterTabDataChangedCallback(base::BindRepeating(
+           &TabView::OnTabDataChanged, base::Unretained(this)));
+ 
++  // Sora: Zen's favicon (no throbber, unloaded tabs dimmed) and close
++  // button "X" (tabs-polish.patch).
++  if (orientation_ == TabStripOrientation::kVertical) {
++    icon_->SetSoraZenStyle(true);
++    close_button_->SetSoraAnimatedCross(true);
++  }
++
+   CHECK(collection_node_->GetController());
+   if (orientation_ == TabStripOrientation::kVertical) {
+     auto* state_controller =
+@@ -688,12 +713,18 @@ bool TabView::OnMousePressed(const ui::MouseEvent& event) {
+     // eventually kick off the drag-loop.
+     controller->GetDragHandler().InitializeDrag(
+         *collection_node_, original_selection_model, event);
++    // Sora: Zen shrinks the tab while it is held down.
++    if (event.IsOnlyLeftMouseButton()) {
++      SetSoraPressed(true);
++    }
+   }
+   return true;
+ }
+ 
+ void TabView::OnMouseReleased(const ui::MouseEvent& event) {
+   CHECK(collection_node_);
++  // Sora: first, as selecting or closing below may destroy this view.
++  SetSoraPressed(false);
+ 
+   auto* controller = collection_node_->GetController();
+   base::WeakPtr<TabView> self = weak_ptr_factory_.GetWeakPtr();
+@@ -768,7 +799,19 @@ bool TabView::OnMouseDragged(const ui::MouseEvent& event) {
+ 
+   auto* controller = collection_node_->GetController();
+   CHECK(controller);
+-  return controller->GetDragHandler().ContinueDrag(*this, event);
++  base::WeakPtr<TabView> self = weak_ptr_factory_.GetWeakPtr();
++  const bool handled = controller->GetDragHandler().ContinueDrag(*this, event);
++  // Sora: as in Zen, a tab being moved is not shrunk.
++  if (self && IsDragging()) {
++    SetSoraPressed(false);
++  }
++  return handled;
++}
++
++void TabView::OnMouseCaptureLost() {
++  views::View::OnMouseCaptureLost();
++  // Sora: see SetSoraPressed().
++  SetSoraPressed(false);
+ }
+ 
+ void TabView::OnGestureEvent(ui::GestureEvent* event) {
+@@ -1229,6 +1272,11 @@ void TabView::UpdateTabData(const tabs::TabData& data) {
+                       tab_data_.needs_attention);
+   UpdateTitle(tab_data_.title, tab_data_.should_render_loading_title);
+   alert_indicator_->TransitionToAlertState(tab_data_.alert_state);
++  // Sora: the dimmed title of unloaded tabs, see UpdateColors().
++  if (old_data.is_tab_discarded != tab_data_.is_tab_discarded &&
++      GetColorProvider()) {
++    UpdateColors();
++  }
+   SetHoverCardDataFrom(tab_data_);
+ 
+   // Sora: the selected Essentials tile paints its favicon in the background.
+@@ -1244,7 +1292,8 @@ void TabView::SetDataForTesting(const tabs::TabData& data) {
+ void TabView::UpdateTitle(std::u16string title,
+                           bool should_render_loading_title) {
+   if (should_render_loading_title) {
+-    title = icon_->GetShowingLoadingAnimation()
++    // Sora: IsLoading(), as the vertical tab's icon hides the throbber.
++    title = icon_->IsLoading()
+                 ? l10n_util::GetStringUTF16(IDS_TAB_LOADING_TITLE)
+                 : CoreTabHelper::GetDefaultTitle();
+   } else {
+@@ -1344,7 +1393,15 @@ void TabView::UpdateColors() {
+         ThemeProperties::SHOULD_FILL_BACKGROUND_TAB_COLOR);
+   }
+   TabStyle::TabColors colors = tab_styling()->CalculateTargetColors();
+-  title_->SetEnabledColor(colors.foreground_color);
++  SkColor title_color = colors.foreground_color;
++  // Sora: Zen dims unloaded tabs (sora/zen-spec.md, section 3).
++  if (orientation_ == TabStripOrientation::kVertical &&
++      tab_data_.is_tab_discarded) {
++    title_color = SkColorSetA(
++        title_color, base::ClampRound<SkAlpha>(SkColorGetA(title_color) *
++                                               kSoraDiscardedTitleOpacity));
++  }
++  title_->SetEnabledColor(title_color);
+   close_button_->SetColors(colors);
+   alert_indicator_->OnParentTabButtonColorChanged();
+ 
+@@ -1354,6 +1411,50 @@ void TabView::UpdateColors() {
+   SchedulePaint();
+ }
+ 
++void TabView::SetSoraPressed(bool pressed) {
++  if (orientation_ != TabStripOrientation::kVertical ||
++      pressed == sora_pressed_) {
++    return;
++  }
++  sora_pressed_ = pressed;
++  if (pressed) {
++    if (!layer()) {
++      SetPaintToLayer();
++      layer()->SetFillsBoundsOpaquely(false);
++      UpdateLayerRoundedCorners();
++    }
++    SetProperty(kSoraKeepLayerKey, true);
++  } else if (!layer()) {
++    ClearProperty(kSoraKeepLayerKey);
++    return;
++  }
++  views::AnimationBuilder builder;
++  builder.SetPreemptionStrategy(
++      ui::LayerAnimator::IMMEDIATELY_ANIMATE_TO_NEW_TARGET);
++  if (!pressed) {
++    // The layer stays held until the release animation ends, then goes with
++    // the layout manager's next cleanup. A new press preempting it keeps the
++    // layer held anyway.
++    builder.OnEnded(base::BindOnce(&TabView::OnSoraPressAnimationEnded,
++                                   weak_ptr_factory_.GetWeakPtr()));
++  }
++  builder.Once()
++      .SetDuration(kSoraTabPressDuration)
++      .SetTransform(
++          layer(),
++          pressed ? gfx::TransformAboutPivot(
++                        gfx::RectF(GetLocalBounds()).CenterPoint(),
++                        gfx::Transform::MakeScale(kSoraTabPressedScale))
++                  : gfx::Transform(),
++          kSoraTabPressTween);
++}
++
++void TabView::OnSoraPressAnimationEnded() {
++  if (!sora_pressed_) {
++    ClearProperty(kSoraKeepLayerKey);
++  }
++}
++
+ void TabView::UpdateContrastRatioValues() {
+   auto [hover_opacity_min, hover_opacity_max, radial_highlight_opacity, _] =
+       tab_styling()->tab_style()->GetContrastRatioValues(IsFrameActive(),
+diff --git a/chrome/browser/ui/views/tabs/common/tab_view.h b/chrome/browser/ui/views/tabs/common/tab_view.h
+index 9090ebf..81214e9 100644
+--- a/chrome/browser/ui/views/tabs/common/tab_view.h
++++ b/chrome/browser/ui/views/tabs/common/tab_view.h
+@@ -139,6 +139,7 @@ class TabView : public views::View,
+   void OnMouseEntered(const ui::MouseEvent& event) override;
+   void OnMouseExited(const ui::MouseEvent& event) override;
+   bool OnMouseDragged(const ui::MouseEvent& event) override;
++  void OnMouseCaptureLost() override;
+   void OnGestureEvent(ui::GestureEvent* event) override;
+   void PaintChildren(const views::PaintInfo& info) override;
+   void OnPaint(gfx::Canvas* canvas) override;
+@@ -190,6 +191,12 @@ class TabView : public views::View,
+   void UpdateColors();
+   void UpdateContrastRatioValues();
+ 
++  // Sora: Zen's pressed tab, scale(0.98) in 0.1s (sora/zen-spec.md, section
++  // 3). Vertical tabs only. The tab paints to a layer while pressed, kept from
++  // the animating layout manager by kSoraKeepLayerKey.
++  void SetSoraPressed(bool pressed);
++  void OnSoraPressAnimationEnded();
++
+   void CloseButtonPressed(const ui::Event& event);
+   void RecordMousePressedInTab();
+ 
+@@ -245,6 +252,8 @@ class TabView : public views::View,
+   bool pinned_ = false;
+   bool shift_pressed_on_mouse_down_ = false;
+   bool should_fill_background_tab_color_ = false;
++  // Sora: see SetSoraPressed().
++  bool sora_pressed_ = false;
+ 
+   std::unique_ptr<GlowHoverController> hover_controller_;
+   float hover_opacity_min_;
+diff --git a/chrome/browser/ui/views/tabs/tab/tab_close_button.cc b/chrome/browser/ui/views/tabs/tab/tab_close_button.cc
+index 775a64f..2c65fba 100644
+--- a/chrome/browser/ui/views/tabs/tab/tab_close_button.cc
++++ b/chrome/browser/ui/views/tabs/tab/tab_close_button.cc
+@@ -6,6 +6,9 @@
+ 
+ #include <memory>
+ 
++#include "base/memory/raw_ptr.h"
++#include "base/time/time.h"
++#include "cc/paint/paint_flags.h"
+ #include "chrome/app/vector_icons/vector_icons.h"
+ #include "chrome/browser/ui/layout_constants.h"
+ #include "chrome/browser/ui/views/tabs/tab.h"
+@@ -13,13 +16,22 @@
+ #include "components/strings/grit/components_strings.h"
+ #include "ui/base/l10n/l10n_util.h"
+ #include "ui/base/metadata/metadata_impl_macros.h"
++#include "ui/base/models/image_model.h"
+ #include "ui/base/ui_base_features.h"
+ #include "ui/compositor/layer.h"
++#include "ui/gfx/animation/animation.h"
++#include "ui/gfx/animation/animation_delegate.h"
++#include "ui/gfx/animation/slide_animation.h"
++#include "ui/gfx/animation/tween.h"
+ #include "ui/gfx/canvas.h"
+ #include "ui/gfx/color_utils.h"
+ #include "ui/gfx/geometry/insets.h"
++#include "ui/gfx/geometry/rect_f.h"
++#include "ui/gfx/geometry/size.h"
+ #include "ui/gfx/geometry/skia_conversions.h"
++#include "ui/gfx/image/canvas_image_source.h"
+ #include "ui/gfx/image/image_skia_operations.h"
++#include "ui/gfx/scoped_canvas.h"
+ #include "ui/views/accessibility/view_accessibility.h"
+ #include "ui/views/animation/ink_drop.h"
+ #include "ui/views/controls/focus_ring.h"
+@@ -42,8 +54,93 @@ gfx::Size GetButtonSize() {
+   return gfx::Size(button_size, button_size);
+ }
+ 
++// Sora: Zen's close "X" (sora/zen-spec.md, section 3; .tab-close-button in
++// vertical-tabs.css): two bars, 1.5px thick with a 1px radius, in the icon
++// color, turned +-45 degrees. Showing, they go from 0 degrees and 12px
++// (--size-item-xsmall) to 45 degrees and 15px in 0.12s ease.
++constexpr float kSoraCrossBarThickness = 1.5f;
++constexpr float kSoraCrossBarRadius = 1.0f;
++constexpr float kSoraCrossStartLength = 12.0f;
++constexpr float kSoraCrossEndLength = 15.0f;
++constexpr float kSoraCrossEndAngle = 45.0f;
++constexpr base::TimeDelta kSoraCrossDuration = base::Milliseconds(120);
++// FAST_OUT_SLOW_IN is the closest curve to CSS `ease`.
++constexpr gfx::Tween::Type kSoraCrossTween = gfx::Tween::FAST_OUT_SLOW_IN;
++
++// Sora: the "X" at `progress` (0 = flat bar, 1 = cross) in a square of `size`.
++class SoraCrossImageSource : public gfx::CanvasImageSource {
++ public:
++  SoraCrossImageSource(int size, SkColor color, double progress)
++      : gfx::CanvasImageSource(gfx::Size(size, size)),
++        color_(color),
++        progress_(progress) {}
++  SoraCrossImageSource(const SoraCrossImageSource&) = delete;
++  SoraCrossImageSource& operator=(const SoraCrossImageSource&) = delete;
++  ~SoraCrossImageSource() override = default;
++
++  // gfx::CanvasImageSource:
++  void Draw(gfx::Canvas* canvas) override {
++    const float length = gfx::Tween::FloatValueBetween(
++        progress_, kSoraCrossStartLength, kSoraCrossEndLength);
++    const float angle =
++        gfx::Tween::FloatValueBetween(progress_, 0.0f, kSoraCrossEndAngle);
++    const gfx::RectF bar(-length / 2, -kSoraCrossBarThickness / 2, length,
++                         kSoraCrossBarThickness);
++    cc::PaintFlags flags;
++    flags.setAntiAlias(true);
++    flags.setStyle(cc::PaintFlags::kFill_Style);
++    flags.setColor(color_);
++    for (const float direction : {1.0f, -1.0f}) {
++      gfx::ScopedCanvas scoped_canvas(canvas);
++      canvas->sk_canvas()->translate(size().width() / 2.0f,
++                                     size().height() / 2.0f);
++      canvas->sk_canvas()->rotate(direction * angle);
++      canvas->DrawRoundRect(bar, kSoraCrossBarRadius, flags);
++    }
++  }
++
++ private:
++  const SkColor color_;
++  const double progress_;
++};
++
+ }  // namespace
+ 
++// Sora: see SetSoraAnimatedCross().
++class TabCloseButton::SoraCrossAnimation : public gfx::AnimationDelegate {
++ public:
++  explicit SoraCrossAnimation(TabCloseButton* button) : button_(button) {
++    animation_.SetSlideDuration(
++        gfx::Animation::RichAnimationDuration(kSoraCrossDuration));
++    animation_.SetTweenType(kSoraCrossTween);
++    animation_.Reset(1.0);
++  }
++  SoraCrossAnimation(const SoraCrossAnimation&) = delete;
++  SoraCrossAnimation& operator=(const SoraCrossAnimation&) = delete;
++  ~SoraCrossAnimation() override = default;
++
++  // Starts over from the flat bar.
++  void Restart() {
++    animation_.Reset(0.0);
++    animation_.Show();
++    button_->UpdateIcon();
++  }
++
++  double GetValue() const { return animation_.GetCurrentValue(); }
++
++  // gfx::AnimationDelegate:
++  void AnimationProgressed(const gfx::Animation* animation) override {
++    button_->UpdateIcon();
++  }
++  void AnimationEnded(const gfx::Animation* animation) override {
++    button_->UpdateIcon();
++  }
++
++ private:
++  const raw_ptr<TabCloseButton> button_;
++  gfx::SlideAnimation animation_{this};
++};
++
+ TabCloseButton::TabCloseButton(PressedCallback pressed_callback,
+                                MouseEventCallback mouse_event_callback)
+     : views::LabelButton(std::move(pressed_callback)),
+@@ -115,6 +212,15 @@ void TabCloseButton::SetColors(TabStyle::TabColors colors) {
+   OnPropertyChanged(&colors_, views::PropertyEffects::kPaint);
+ }
+ 
++void TabCloseButton::SetSoraAnimatedCross(bool animated_cross) {
++  if (animated_cross == !!sora_cross_animation_) {
++    return;
++  }
++  sora_cross_animation_ =
++      animated_cross ? std::make_unique<SoraCrossAnimation>(this) : nullptr;
++  UpdateIcon();
++}
++
+ views::View* TabCloseButton::GetTooltipHandlerForPoint(
+     const gfx::Point& point) {
+   // Tab close button has no children, so tooltip handler should be the same
+@@ -171,6 +277,15 @@ gfx::Size TabCloseButton::CalculatePreferredSize(
+   return GetButtonSize();
+ }
+ 
++void TabCloseButton::VisibilityChanged(views::View* starting_from,
++                                       bool is_visible) {
++  views::LabelButton::VisibilityChanged(starting_from, is_visible);
++  // Sora: Zen's "X" animates in each time the tab layout shows the button.
++  if (sora_cross_animation_ && is_visible && starting_from == this) {
++    sora_cross_animation_->Restart();
++  }
++}
++
+ views::View* TabCloseButton::TargetForRect(views::View* root,
+                                            const gfx::Rect& rect) {
+   CHECK_EQ(root, this);
+@@ -206,6 +321,20 @@ bool TabCloseButton::GetHitTestMask(SkPath* mask) const {
+   return true;
+ }
+ void TabCloseButton::UpdateIcon() {
++  // Sora: Zen's "X", see SetSoraAnimatedCross().
++  if (sora_cross_animation_) {
++    const ui::ImageModel cross = ui::ImageModel::FromImageSkia(
++        gfx::CanvasImageSource::MakeImageSkia<SoraCrossImageSource>(
++            GetLayoutConstant(LayoutConstant::kTabCloseButtonSize),
++            colors_.foreground_color, sora_cross_animation_->GetValue()));
++    for (const views::Button::ButtonState state :
++         {views::Button::STATE_NORMAL, views::Button::STATE_HOVERED,
++          views::Button::STATE_PRESSED}) {
++      SetImageModel(state, cross);
++    }
++    return;
++  }
++
+   const auto& icon = features::IsRoundedIconsEnabled()
+                          ? kCloseWeight500CustomIcon
+                          : kCloseTabChromeRefreshOldIcon;
+diff --git a/chrome/browser/ui/views/tabs/tab/tab_close_button.h b/chrome/browser/ui/views/tabs/tab/tab_close_button.h
+index 957cc62..cfb03c7 100644
+--- a/chrome/browser/ui/views/tabs/tab/tab_close_button.h
++++ b/chrome/browser/ui/views/tabs/tab/tab_close_button.h
+@@ -5,6 +5,8 @@
+ #ifndef CHROME_BROWSER_UI_VIEWS_TABS_TAB_TAB_CLOSE_BUTTON_H_
+ #define CHROME_BROWSER_UI_VIEWS_TABS_TAB_TAB_CLOSE_BUTTON_H_
+ 
++#include <memory>
++
+ #include "base/functional/callback_forward.h"
+ #include "chrome/browser/ui/tabs/tab_style.h"
+ #include "ui/base/metadata/metadata_header_macros.h"
+@@ -40,6 +42,11 @@ class TabCloseButton : public views::LabelButton,
+   // theme changes.
+   void SetColors(TabStyle::TabColors colors);
+ 
++  // Sora: draws Zen's close "X", two 1.5px bars, instead of the icon, and
++  // animates it in each time the button shows: from a flat 12px bar to a 15px
++  // cross in 0.12s (sora/zen-spec.md, section 3). Vertical tabs only.
++  void SetSoraAnimatedCross(bool animated_cross);
++
+   // views::LabelButton:
+   View* GetTooltipHandlerForPoint(const gfx::Point& point) override;
+   bool OnMousePressed(const ui::MouseEvent& event) override;
+@@ -57,8 +64,11 @@ class TabCloseButton : public views::LabelButton,
+   // views::LabelButton:
+   gfx::Size CalculatePreferredSize(
+       const views::SizeBounds& available_size) const override;
++  void VisibilityChanged(views::View* starting_from, bool is_visible) override;
+ 
+  private:
++  // Sora: drives the "X" animation, see SetSoraAnimatedCross().
++  class SoraCrossAnimation;
+   // views::MaskedTargeterDelegate:
+   views::View* TargetForRect(views::View* root, const gfx::Rect& rect) override;
+   bool GetHitTestMask(SkPath* mask) const override;
+@@ -66,6 +76,9 @@ class TabCloseButton : public views::LabelButton,
+   MouseEventCallback mouse_event_callback_;
+ 
+   TabStyle::TabColors colors_;
++
++  // Sora: set while the "X" is drawn by Sora, see SetSoraAnimatedCross().
++  std::unique_ptr<SoraCrossAnimation> sora_cross_animation_;
+ };
+ 
+ #endif  // CHROME_BROWSER_UI_VIEWS_TABS_TAB_TAB_CLOSE_BUTTON_H_
+diff --git a/chrome/browser/ui/views/tabs/tab/tab_icon.cc b/chrome/browser/ui/views/tabs/tab/tab_icon.cc
+index dca6d70..f890473 100644
+--- a/chrome/browser/ui/views/tabs/tab/tab_icon.cc
++++ b/chrome/browser/ui/views/tabs/tab/tab_icon.cc
+@@ -51,6 +51,8 @@ namespace {
+ 
+ constexpr int kAttentionIndicatorRadius = 3;
+ constexpr int kLoadingAnimationStrokeWidthDp = 2;
++// Sora: unloaded tabs at 50% opacity (sora/zen-spec.md, section 3).
++constexpr uint8_t kSoraUnloadedAlpha = 0x80;
+ 
+ bool NetworkStateIsAnimated(tabs::TabNetworkState network_state) {
+   return network_state != tabs::TabNetworkState::kNone &&
+@@ -127,6 +129,12 @@ void TabIcon::SetData(const tabs::TabData& data) {
+   SetNetworkState(data.network_state);
+   SetCrashed(data.is_crashed);
+   SetDiscarded(data.should_show_discard_status);
++  if (sora_unloaded_ != data.is_tab_discarded) {
++    sora_unloaded_ = data.is_tab_discarded;
++    if (sora_zen_style_) {
++      SchedulePaint();
++    }
++  }
+   has_tab_data_ = true;
+ 
+   UpdateThrobber();
+@@ -165,6 +173,11 @@ void TabIcon::SetAttention(AttentionType type, bool enabled) {
+ }
+ 
+ bool TabIcon::GetShowingLoadingAnimation() const {
++  // Sora: no throbber in Zen style.
++  return !sora_zen_style_ && IsLoading();
++}
++
++bool TabIcon::IsLoading() const {
+   if (inhibit_loading_animation_) {
+     return false;
+   }
+@@ -172,6 +185,18 @@ bool TabIcon::GetShowingLoadingAnimation() const {
+   return NetworkStateIsAnimated(network_state_);
+ }
+ 
++void TabIcon::SetSoraZenStyle(bool zen_style) {
++  if (sora_zen_style_ == zen_style) {
++    return;
++  }
++  sora_zen_style_ = zen_style;
++  // Re-derive the discard ring and the throbber layer for the new style.
++  OnDiscardRingTreatmentEnabledChanged();
++  favicon_size_animation_.Reset(was_discard_indicator_shown_ ? 0 : 1);
++  UpdateThrobber();
++  SchedulePaint();
++}
++
+ bool TabIcon::GetShowingAttentionIndicator() const {
+   return attention_types_ > 0;
+ }
+@@ -206,8 +231,9 @@ void TabIcon::OnDiscardRingTreatmentEnabledChanged() {
+       g_browser_process->local_state()->GetBoolean(
+           performance_manager::user_tuning::prefs::
+               kDiscardRingTreatmentEnabled);
++  // Sora: no discard ring in Zen style.
+   bool show_discard_indicator =
+-      is_discarded_ && discard_ring_treatment_enabled_;
++      is_discarded_ && discard_ring_treatment_enabled_ && !sora_zen_style_;
+   if (was_discard_indicator_shown_ != show_discard_indicator) {
+     was_discard_indicator_shown_ = show_discard_indicator;
+ 
+@@ -231,6 +257,12 @@ void TabIcon::OnPaint(gfx::Canvas* canvas) {
+     return;
+   }
+ 
++  // Sora: Zen dims unloaded tabs; restored at the end.
++  const bool sora_dim = sora_zen_style_ && sora_unloaded_;
++  if (sora_dim) {
++    canvas->SaveLayerAlpha(kSoraUnloadedAlpha);
++  }
++
+   gfx::Rect icon_bounds(
+       GetMirroredXWithWidthInView(contents_bounds.x(), gfx::kFaviconSize),
+       contents_bounds.y() +
+@@ -251,6 +283,10 @@ void TabIcon::OnPaint(gfx::Canvas* canvas) {
+   if (GetShowingLoadingAnimation()) {
+     PaintLoadingAnimation(canvas, icon_bounds);
+   }
++
++  if (sora_dim) {
++    canvas->Restore();
++  }
+ }
+ 
+ void TabIcon::OnBoundsChanged(const gfx::Rect& previous_bounds) {
+@@ -465,8 +501,9 @@ void TabIcon::SetIcon(const ui::ImageModel& icon, bool should_themify_favicon) {
+ 
+ void TabIcon::SetDiscarded(bool discarded) {
+   is_discarded_ = discarded;
++  // Sora: no discard ring in Zen style.
+   bool show_discard_indicator =
+-      is_discarded_ && discard_ring_treatment_enabled_;
++      is_discarded_ && discard_ring_treatment_enabled_ && !sora_zen_style_;
+   if (was_discard_indicator_shown_ != show_discard_indicator) {
+     was_discard_indicator_shown_ = show_discard_indicator;
+     favicon_size_animation_.SetSlideDuration(
+@@ -502,7 +539,8 @@ void TabIcon::SetNetworkState(tabs::TabNetworkState network_state) {
+   const bool was_animated = NetworkStateIsAnimated(network_state_);
+   network_state_ = network_state;
+   const bool is_animated = NetworkStateIsAnimated(network_state_);
+-  if (was_animated != is_animated) {
++  // Sora: in Zen style the favicon keeps its size while loading.
++  if (was_animated != is_animated && !sora_zen_style_) {
+     favicon_size_animation_.SetSlideDuration(
+         gfx::Animation::RichAnimationDuration(base::Milliseconds(250)));
+     if (was_animated && GetNonDefaultFavicon()) {
+diff --git a/chrome/browser/ui/views/tabs/tab/tab_icon.h b/chrome/browser/ui/views/tabs/tab/tab_icon.h
+index c4a7652..04753b1 100644
+--- a/chrome/browser/ui/views/tabs/tab/tab_icon.h
++++ b/chrome/browser/ui/views/tabs/tab/tab_icon.h
+@@ -68,6 +68,8 @@ class TabIcon : public views::View, public views::AnimationDelegateViews {
+   void SetAttention(AttentionType type, bool enabled);
+ 
+   bool GetShowingLoadingAnimation() const;
++  // Sora: whether the tab is loading, whether or not the throbber shows.
++  bool IsLoading() const;
+   bool GetShowingAttentionIndicator() const;
+   bool GetShowingDiscardIndicator() const;
+ 
+@@ -92,6 +94,12 @@ class TabIcon : public views::View, public views::AnimationDelegateViews {
+   void ResizeDiscardIndicatorRadiusForWidth(int width);
+   void OnDiscardRingTreatmentEnabledChanged();
+ 
++  // Sora: Zen's tab icon (sora/zen-spec.md, section 3), for vertical tabs: no
++  // loading throbber (the favicon always shows, as with Zen's default
++  // zen.theme.hide-tab-throbber), and unloaded tabs drawn at 50% opacity
++  // instead of the shrunken favicon and discard ring.
++  void SetSoraZenStyle(bool zen_style);
++
+  protected:
+   class CrashAnimation;
+   friend CrashAnimation;
+@@ -215,6 +223,11 @@ class TabIcon : public views::View, public views::AnimationDelegateViews {
+ 
+   bool is_monochrome_favicon_ = false;
+ 
++  // Sora: see SetSoraZenStyle(). `sora_unloaded_` mirrors
++  // TabData::is_tab_discarded.
++  bool sora_zen_style_ = false;
++  bool sora_unloaded_ = false;
++
+   // If there is enough space, increased the size of the discard ring beyond the
+   // default favicon size, by this amount.
+   static constexpr int kIncreasedDiscardIndicatorRadiusDp = 2;

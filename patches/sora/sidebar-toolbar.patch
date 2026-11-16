@@ -1,0 +1,315 @@
+diff --git a/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc b/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc
+index 108e204..4ac5647 100644
+--- a/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc
++++ b/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc
+@@ -497,8 +497,15 @@ BrowserViewTabbedLayoutImpl::CalculateHorizontalLayout(
+       //
+       // Subtract everything that must go to the right of the vertical tabstrip
+       // from the available width.
++      // Sora: in a normal or maximized window the toolbar lives in the
++      // sidebar, so only the contents need room to the right.
++      const bool sora_toolbar_in_sidebar =
++          layout_data_->window_state == WindowState::kNormal ||
++          layout_data_->window_state == WindowState::kMaximized;
+       const int remainder =
+-          params.visual_client_area.width() - toolbar_minimum_width -
++          params.visual_client_area.width() -
++          (sora_toolbar_in_sidebar ? layout.min_content_width
++                                   : toolbar_minimum_width) -
+           base::ClampCeil(
+               params.trailing_exclusion.ContentWithPadding().width());
+       preferred_vertical_tab_strip_width =
+@@ -892,6 +899,14 @@ BrowserViewTabbedLayoutImpl::CalculateProposedLayout(
+   bool clip_content_for_animation = false;
+   gfx::Rect unclipped_contents_region = params.visual_client_area;
+ 
++  // Sora: with an expanded vertical tab strip the toolbar sits at the top of
++  // the sidebar column, as in Zen (see ToolbarView::UpdateSoraSidebarMode()).
++  const bool sora_sidebar_toolbar =
++      layout_data_->separator_info.sora_floating_contents &&
++      !delegate().IsVerticalTabStripCollapsed() &&
++      delegate().IsToolbarVisible() &&
++      IsParentedTo(views().top_container, views().browser_view);
++
+   // Lay out vertical tab strip if visible.
+   int collapsed_vertical_tab_strip_adjustment = 0;
+   const VerticalTabStripAnimation& vertical_tab_strip_animation =
+@@ -932,13 +947,30 @@ BrowserViewTabbedLayoutImpl::CalculateProposedLayout(
+         last_vertical_tab_strip_width_ = vertical_tab_strip_width;
+       }
+ 
+-      vertical_tab_strip_bounds =
+-          gfx::Rect(params.visual_client_area.x(),
+-                    params.visual_client_area.y() +
+-                        vertical_tab_strip_animation.top_offset,
+-                    vertical_tab_strip_width,
+-                    params.visual_client_area.height() -
+-                        vertical_tab_strip_animation.top_offset);
++      int vertical_tab_strip_top =
++          params.visual_client_area.y() + vertical_tab_strip_animation.top_offset;
++      if (sora_sidebar_toolbar) {
++        auto& top_container_layout =
++            layout.AddChild(views().top_container, gfx::Rect());
++        BrowserLayoutParams column_params = params;
++        column_params.InsetHorizontal(
++            params.visual_client_area.width() -
++                horizontal_layout.vertical_tab_strip_width,
++            /*leading=*/false);
++        const gfx::Rect top_container_local_bounds =
++            CalculateTopContainerLayout(
++                top_container_layout,
++                column_params.InLocalCoordinates(
++                    column_params.visual_client_area),
++                /*needs_exclusion=*/false);
++        top_container_layout.bounds = GetTopContainerBoundsInParent(
++            top_container_local_bounds, column_params);
++        vertical_tab_strip_top = top_container_layout.bounds.bottom();
++      }
++      vertical_tab_strip_bounds = gfx::Rect(
++          params.visual_client_area.x(), vertical_tab_strip_top,
++          vertical_tab_strip_width,
++          params.visual_client_area.bottom() - vertical_tab_strip_top);
+ 
+       if (layout_data_->window_state == WindowState::kFullscreenWithToolbar &&
+           layout_data_->separator_info.adjust_for_missing_separator) {
+@@ -1048,7 +1080,7 @@ BrowserViewTabbedLayoutImpl::CalculateProposedLayout(
+ 
+   // When the tabstrip isn't at the top or in constrained widths, the top
+   // container is laid out before all side panels.
+-  if (horizontal_layout.force_top_container_to_top &&
++  if (horizontal_layout.force_top_container_to_top && !sora_sidebar_toolbar &&
+       IsParentedTo(views().top_container, views().browser_view)) {
+     auto& top_container_layout =
+         layout.AddChild(views().top_container, gfx::Rect());
+@@ -1162,7 +1194,14 @@ BrowserViewTabbedLayoutImpl::CalculateProposedLayout(
+     // The vertical tab strip already pads its own trailing edge, so the card
+     // only needs a margin on the other three sides.
+     const int margin = MultiContentsView::kSplitViewContentInset;
+-    shadow_overlay_insets = gfx::Insets::TLBR(margin, 0, margin, margin);
++    // Without a toolbar above the contents, the caption buttons sit in a band
++    // over the card, like Zen's revealed window-controls strip.
++    const int top_margin =
++        sora_sidebar_toolbar
++            ? std::max(margin, base::ClampCeil(
++                                   params.trailing_exclusion.content.height()))
++            : margin;
++    shadow_overlay_insets = gfx::Insets::TLBR(top_margin, 0, margin, margin);
+     params.Inset(shadow_overlay_insets);
+     if (!side_panel_is_animating) {
+       unclipped_contents_region.Inset(shadow_overlay_insets);
+diff --git a/chrome/browser/ui/views/toolbar/toolbar_view.cc b/chrome/browser/ui/views/toolbar/toolbar_view.cc
+index 86228a6..5adc611 100644
+--- a/chrome/browser/ui/views/toolbar/toolbar_view.cc
++++ b/chrome/browser/ui/views/toolbar/toolbar_view.cc
+@@ -5,10 +5,13 @@
+ #include "chrome/browser/ui/views/toolbar/toolbar_view.h"
+ 
+ #include <algorithm>
++#include <limits>
+ #include <memory>
+ #include <utility>
++#include <vector>
+ 
+ #include "base/command_line.h"
++#include "base/containers/adapters.h"
+ #include "base/containers/fixed_flat_map.h"
+ #include "base/feature_list.h"
+ #include "base/functional/bind.h"
+@@ -189,6 +192,13 @@ DEFINE_UI_CLASS_PROPERTY_KEY(bool, kActionItemUnderlineIndicatorKey, false)
+ 
+ namespace {
+ 
++// Sora: Zen sidebar toolbar rows (sora/zen-spec.md, section 1).
++constexpr int kSoraSidebarPadding = 5;
++constexpr int kSoraButtonRowHeight = 36;
++constexpr int kSoraLocationRowHeight = 37;
++constexpr int kSoraLocationBarMargin = 1;
++constexpr int kSoraButtonGap = 2;
++
+ // Gets the display mode for a given browser.
+ ToolbarView::DisplayMode GetDisplayMode(BrowserWindowInterface* browser) {
+   // Checked in this order because even tabbed PWAs use the CUSTOM_TAB
+@@ -693,12 +703,20 @@ void ToolbarView::Init() {
+                                 base::Unretained(this)));
+     should_display_vertical_tabs_ =
+         vertical_tab_strip_state_controller->ShouldDisplayVerticalTabs();
++    sora_collapse_subscription_ =
++        vertical_tab_strip_state_controller->RegisterOnCollapseChanged(
++            base::BindRepeating(
++                [](ToolbarView* view, tabs::VerticalTabStripCollapseState) {
++                  view->UpdateSoraSidebarMode();
++                },
++                base::Unretained(this)));
+   }
+   if (glic::GlicEnabling::IsProfileEligible(browser_view_->GetProfile())) {
+     UpdateGlicButtonVisibility();
+   }
+ 
+   InitLayout();
++  UpdateSoraSidebarMode();
+ 
+   for (auto* button : std::array<views::Button*, 5>{back_, forward_, reload_,
+                                                     home_, avatar_}) {
+@@ -739,6 +757,7 @@ void ToolbarView::OnVerticalTabStripModeChanged(
+   should_display_vertical_tabs_ = controller->ShouldDisplayVerticalTabs();
+   UpdateGlicButtonVisibility();
+   UpdateGlicActorVisibility();
++  UpdateSoraSidebarMode();
+   // Invalidate the layout cache so responsive buttons (forward, home, split,
+   // etc) re-evaluate their visibility against the final toolbar width, clearing
+   // out any zeroed out state from intermediate layout passes.
+@@ -1430,6 +1449,9 @@ gfx::Size ToolbarView::CalculatePreferredSize(
+                                layout_manager_->interior_margin().height();
+         size.SetToMin({size.width(), max_height});
+       }
++      if (sora_sidebar_mode_) {
++        size.set_height(kSoraButtonRowHeight + kSoraLocationRowHeight);
++      }
+   }
+   size.set_height(size.height() * size_animation_.GetCurrentValue());
+   return size;
+@@ -1468,6 +1490,9 @@ gfx::Size ToolbarView::GetMinimumSize() const {
+         size.Enlarge(
+             default_margin + overflow_button_->GetMinimumSize().width(), 0);
+       }
++      if (sora_sidebar_mode_) {
++        size.set_height(kSoraButtonRowHeight + kSoraLocationRowHeight);
++      }
+   }
+   size.set_height(size.height() * size_animation_.GetCurrentValue());
+   return size;
+@@ -1512,8 +1537,98 @@ void ToolbarView::Layout(PassKey) {
+   // Call super implementation to ensure layout manager and child layouts
+   // happen.
+   LayoutSuperclass<AccessiblePaneView>(this);
++
++  if (sora_sidebar_mode_) {
++    LayoutSoraSidebarRows();
++  }
++}
++
++void ToolbarView::UpdateSoraSidebarMode() {
++  const auto* controller =
++      tabs::VerticalTabStripStateController::From(browser_view_->browser());
++  const bool sidebar_mode = display_mode_ == DisplayMode::kNormal &&
++                            location_bar_view_ && controller &&
++                            controller->ShouldDisplayVerticalTabs() &&
++                            !controller->IsCollapsed();
++  if (sidebar_mode == sora_sidebar_mode_) {
++    return;
++  }
++  sora_sidebar_mode_ = sidebar_mode;
++
++  // In the sidebar the location bar gets its own row, so it gives up its width
++  // first and never pushes the buttons out of the flex layout.
++  if (sidebar_mode) {
++    if (const auto* flex =
++            location_bar_view_->GetProperty(views::kFlexBehaviorKey)) {
++      sora_saved_location_bar_flex_ = *flex;
++    }
++    location_bar_view_->SetProperty(
++        views::kFlexBehaviorKey,
++        views::FlexSpecification(views::LayoutOrientation::kHorizontal,
++                                 views::MinimumFlexSizeRule::kScaleToZero,
++                                 views::MaximumFlexSizeRule::kPreferred)
++            .WithOrder(std::numeric_limits<int>::max()));
++  } else if (sora_saved_location_bar_flex_) {
++    location_bar_view_->SetProperty(views::kFlexBehaviorKey,
++                                    *sora_saved_location_bar_flex_);
++    sora_saved_location_bar_flex_.reset();
++  }
++  InvalidateLayout();
++  PreferredSizeChanged();
++}
++
++void ToolbarView::LayoutSoraSidebarRows() {
++  gfx::Rect area = GetContentsBounds();
++  area.Inset(gfx::Insets::VH(0, kSoraSidebarPadding));
++
++  // Second row: the location bar, full width.
++  const int location_bar_height =
++      location_bar_view_->GetPreferredSize().height();
++  location_bar_view_->SetBounds(
++      area.x() + kSoraLocationBarMargin,
++      area.y() + kSoraButtonRowHeight +
++          (kSoraLocationRowHeight - location_bar_height) / 2,
++      area.width() - 2 * kSoraLocationBarMargin, location_bar_height);
++
++  // First row: the app menu and the other buttons at the leading edge,
++  // navigation at the trailing edge, as in Zen.
++  std::vector<views::View*> leading;
++  std::vector<views::View*> trailing;
++  for (views::View* child : children()) {
++    if (child == location_bar_view_ || !child->GetVisible()) {
++      continue;
++    }
++    const bool navigation = child == back_ || child == forward_ ||
++                            child == reload_ || child == home_;
++    (navigation ? trailing : leading).push_back(child);
++  }
++  std::stable_partition(
++      leading.begin(), leading.end(),
++      [this](views::View* view) { return view == app_menu_button_; });
++
++  const auto place = [&area](views::View* view, int x) {
++    const gfx::Size size = view->GetPreferredSize();
++    view->SetBounds(x, area.y() + (kSoraButtonRowHeight - size.height()) / 2,
++                    size.width(), size.height());
++    return size.width();
++  };
++  int right = area.right();
++  for (views::View* view : base::Reversed(trailing)) {
++    right -= view->GetPreferredSize().width();
++    place(view, right);
++    right -= kSoraButtonGap;
++  }
++  int x = area.x();
++  for (views::View* view : leading) {
++    if (x + view->GetPreferredSize().width() > right) {
++      view->SetBoundsRect(gfx::Rect());
++      continue;
++    }
++    x += place(view, x) + kSoraButtonGap;
++  }
+ }
+ 
++
+ void ToolbarView::OnThemeChanged() {
+   views::AccessiblePaneView::OnThemeChanged();
+   if (!initialized_) {
+diff --git a/chrome/browser/ui/views/toolbar/toolbar_view.h b/chrome/browser/ui/views/toolbar/toolbar_view.h
+index e10dc91..ea8db76 100644
+--- a/chrome/browser/ui/views/toolbar/toolbar_view.h
++++ b/chrome/browser/ui/views/toolbar/toolbar_view.h
+@@ -34,6 +34,7 @@
+ #include "ui/base/interaction/element_identifier.h"
+ #include "ui/base/metadata/metadata_header_macros.h"
+ #include "ui/base/pointer/touch_ui_controller.h"
++#include "ui/views/layout/flex_layout_types.h"
+ #include "ui/views/accessible_pane_view.h"
+ #include "ui/views/animation/animation_delegate_views.h"
+ #include "ui/views/controls/button/menu_button.h"
+@@ -371,6 +372,11 @@ class ToolbarView : public views::AccessiblePaneView,
+   void OnVerticalTabStripModeChanged(
+       tabs::VerticalTabStripStateController* controller);
+ 
++  // Sora: with an expanded vertical tab strip the toolbar sits at the top of
++  // the sidebar in two rows, as in Zen: the buttons, then the location bar.
++  void UpdateSoraSidebarMode();
++  void LayoutSoraSidebarRows();
++
+   void SetForwardButtonVisibility(bool visible);
+ 
+   gfx::Size GetBackForwardButtonSize(bool minimum_size = false) const;
+@@ -497,6 +503,11 @@ class ToolbarView : public views::AccessiblePaneView,
+   // Subscription for when tab strip mode changes
+   base::CallbackListSubscription vertical_tab_subscription_;
+ 
++  // Sora: sidebar layout state, see UpdateSoraSidebarMode().
++  base::CallbackListSubscription sora_collapse_subscription_;
++  bool sora_sidebar_mode_ = false;
++  std::optional<views::FlexSpecification> sora_saved_location_bar_flex_;
++
+   // Subscription for when contextual tasks button position should update.
+   base::CallbackListSubscription
+       contextual_tasks_button_position_subscription_;

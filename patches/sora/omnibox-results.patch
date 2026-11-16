@@ -1,0 +1,195 @@
+diff --git a/chrome/browser/resources/omnibox_popup/app.css b/chrome/browser/resources/omnibox_popup/app.css
+index 48ae23b..f624792 100644
+--- a/chrome/browser/resources/omnibox_popup/app.css
++++ b/chrome/browser/resources/omnibox_popup/app.css
+@@ -25,7 +25,70 @@
+ }
+ 
+ :host([has-visible-matches_]) .dropdownContainer {
+-  padding-bottom: 10px;
++  /* Sora: the list's own 12px padding (below) replaces this. */
++  padding-bottom: 0;
++}
++
++/* Sora: Zen's URL bar results (sora/zen-spec.md, section 4, "Resultados").
++ * Only the classic popup (omnibox-popup-app) gets this look: the colors below
++ * cascade into cr-searchbox-dropdown and cr-searchbox-match, and the row
++ * layout lives in searchbox_match.css under :host-context(omnibox-popup-app),
++ * so the NTP realbox and the other popups keep Chromium's style. */
++:host {
++  /* --zen-color-contrast-70's base, --zen-branding-bg-reverse,
++   * --zen-urlbar-view-url-color and --zen-accent-button-background. */
++  --sora-results-contrast: black;
++  --sora-results-branding-reverse: #101010;
++  --sora-results-url: #4a4a4a;
++  --sora-results-accent:
++      oklch(from var(--color-sys-primary) clamp(0.35, l, 0.6) c h);
++
++  --sora-results-hover:
++      color-mix(in srgb, var(--sora-results-branding-reverse) 5%, transparent);
++  --sora-results-chip:
++      color-mix(in srgb, var(--sora-results-branding-reverse) 10%, transparent);
++  --sora-results-chip-selected:
++      color-mix(in srgb, var(--sora-results-branding-reverse) 20%, transparent);
++  --sora-results-favicon-selected: rgba(255, 255, 255, 0.9);
++
++  --color-searchbox-results-foreground:
++      color-mix(in srgb, var(--sora-results-contrast) 70%, transparent);
++  --color-searchbox-results-foreground-dimmed: var(--sora-results-url);
++  --color-searchbox-results-url: var(--sora-results-url);
++  --color-searchbox-results-background-hovered: var(--sora-results-hover);
++  --color-searchbox-results-background-selected:
++      color-mix(in srgb, var(--sora-results-accent) 60%, transparent);
++  --color-searchbox-results-foreground-selected: white;
++  --color-searchbox-results-url-selected: white;
++  --color-searchbox-results-dim-selected: white;
++  --color-searchbox-results-icon-selected: white;
++  --color-searchbox-results-action-chip-icon-selected: white;
++  /* Zen has no bar at the start of the selected row. */
++  --color-searchbox-results-focus-indicator: transparent;
++}
++
++@media (prefers-color-scheme: dark) {
++  :host {
++    --sora-results-contrast: white;
++    --sora-results-branding-reverse: #e2e2e2;
++    --sora-results-url: #aaaaaa;
++    --sora-results-accent:
++        oklch(from var(--color-sys-primary) clamp(0.55, l, 0.7) c h);
++  }
++}
++
++/* Sora: favicon box of 16px plus 4px of padding. */
++cr-searchbox-dropdown {
++  --cr-searchbox-icon-container-size: 24px;
++}
++
++/* Sora: at most 244px of rows inside 12px of padding; the rest scrolls
++ * without a scrollbar (app.ts keeps the selection in view). */
++cr-searchbox-dropdown::part(dropdown-content) {
++  max-height: 244px;
++  overflow-y: auto;
++  padding: 12px;
++  scrollbar-width: none;
+ }
+ 
+ /**
+diff --git a/chrome/browser/resources/omnibox_popup/app.ts b/chrome/browser/resources/omnibox_popup/app.ts
+index 1a4080d..ef8e67d 100644
+--- a/chrome/browser/resources/omnibox_popup/app.ts
++++ b/chrome/browser/resources/omnibox_popup/app.ts
+@@ -211,6 +211,7 @@ export class OmniboxPopupAppElement extends SearchboxSelectionMixin
+       } else {
+         this.setSelection(kDefaultSelection);
+       }
++      this.soraRevealSelection_();
+       return;
+     }
+ 
+@@ -219,6 +220,22 @@ export class OmniboxPopupAppElement extends SearchboxSelectionMixin
+     } else if (this.getDropdown().selectedMatchIndex >= result.matches.length) {
+       this.getDropdown().unselect();
+     }
++    this.soraRevealSelection_();
++  }
++
++  // Sora: the list scrolls past Zen's maximum height (app.css), so keep the
++  // selected match in view; with nothing selected, show the top of the list.
++  private soraRevealSelection_() {
++    const dropdown = this.getDropdown();
++    this.updateComplete.then(() => dropdown.updateComplete).then(() => {
++      const selected =
++          dropdown.shadowRoot.querySelector('cr-searchbox-match[selected]');
++      if (selected) {
++        selected.scrollIntoView({block: 'nearest'});
++      } else {
++        dropdown.shadowRoot.querySelector('#content')?.scrollTo({top: 0});
++      }
++    });
+   }
+ 
+   private getContextualEntrypointButton_():
+@@ -249,6 +266,7 @@ export class OmniboxPopupAppElement extends SearchboxSelectionMixin
+     } else {
+       this.getDropdown().updateSelection(oldSelection, selection);
+     }
++    this.soraRevealSelection_();
+   }
+ 
+   override setSelection(
+diff --git a/ui/webui/resources/cr_components/searchbox/searchbox_match.css b/ui/webui/resources/cr_components/searchbox/searchbox_match.css
+index 2344ea9..9cee616 100644
+--- a/ui/webui/resources/cr_components/searchbox/searchbox_match.css
++++ b/ui/webui/resources/cr_components/searchbox/searchbox_match.css
+@@ -420,3 +420,71 @@
+   font-size: 12px;
+   line-height: 16px;
+ }
++
++/* Sora: Zen's URL bar results rows (sora/zen-spec.md, section 4,
++ * "Resultados"), only in the omnibox popup; the colors come from
++ * omnibox_popup/app.css. The extra :host outranks the
++ * [is-top-chrome-searchbox_] rules above that fix the height of rows with
++ * chips. */
++:host-context(omnibox-popup-app):host .container:not(.actions) {
++  border-radius: 6px;
++  box-sizing: border-box;
++  height: auto;
++  margin-inline-end: 0;
++  min-height: 45px;
++  padding: 10px 8px;
++}
++
++:host-context(omnibox-popup-app) #text-container {
++  font-size: 14px;
++  font-weight: 500;
++}
++
++/* Sora: the favicon sits on a 4px-radius box, tinted like the row on hover
++ * and a white chip on the selected row. Only real favicons get the chip; the
++ * search and history glyphs turn white with the text. */
++:host-context(omnibox-popup-app) #icon {
++  border-radius: 4px;
++}
++
++:host-context(omnibox-popup-app) .container:not(.actions):hover #icon {
++  background-color: var(--sora-results-hover);
++}
++
++:host-context(omnibox-popup-app):host(:is(:focus-visible, [selected]))
++    #icon:is([favicon-image_]:not([favicon-image_=''])) {
++  background-color: var(--sora-results-favicon-selected);
++}
++
++/* Sora: the search engine chip (Tab to search): 12px, weight 600, padding
++ * 4 x 6px, radius 4px, 10% background and no border. */
++:host-context(omnibox-popup-app) #keyword {
++  background-color: var(--sora-results-chip);
++  border: none;
++  border-radius: 4px;
++  font-size: 12px;
++  font-weight: 600;
++  height: auto;
++  padding: 4px 6px;
++}
++
++:host-context(omnibox-popup-app):host(:is(:focus-visible, [selected])) #keyword {
++  background-color: var(--sora-results-chip-selected);
++}
++
++/* Sora: "Switch to this tab" and the other actions read as Zen's switch-tab
++ * label: no chip, weight 600, 70% opacity, full on the selected row. */
++:host-context(omnibox-popup-app) #action {
++  background-color: transparent;
++  border: none;
++  font-weight: 600;
++  opacity: 0.7;
++}
++
++:host-context(omnibox-popup-app):host(:is(:focus-visible, [selected])) #action {
++  opacity: 1;
++}
++
++:host-context(omnibox-popup-app):host :is(#keyword, #action):hover {
++  background-color: var(--color-searchbox-results-button-hover);
++}
