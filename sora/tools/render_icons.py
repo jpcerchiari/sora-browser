@@ -17,6 +17,7 @@ from PIL import Image
 BRANDING = Path(__file__).resolve().parents[1] / "branding"
 ICON = BRANDING / "icon" / "sora.svg"
 MONO = BRANDING / "icon" / "sora-mono.svg"
+INCOGNITO = BRANDING / "icon" / "sora-incognito.svg"
 OUT = BRANDING / "theme"
 
 
@@ -70,6 +71,7 @@ def main():
     save_ico(lambda s: render(ICON, s), "chromium/win/chromium.ico")
     save_ico(document, "chromium/win/chromium_doc.ico")
     save_ico(lambda s: document(s, pdf=True), "chromium/win/chromium_pdf.ico")
+    save_ico(lambda s: render(INCOGNITO, s), "chromium/win/incognito.ico")
 
     save(tile(600, 220), "chromium/win/tiles/Logo.png")
     save(tile(176, 118), "chromium/win/tiles/SmallLogo.png")

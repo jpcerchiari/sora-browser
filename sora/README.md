@@ -106,8 +106,10 @@ and `sora-mono.svg`, the single-color version). `sora/tools/render_icons.py` (re
 Start menu tiles, at the same paths as in `chrome/app/theme/`; `build.py` copies that folder over
 the tree after the patches. A binary file does not fit in a text patch, hence the copy.
 The HTML and PDF document icons (`chromium_doc.ico`, `chromium_pdf.ico`) are a page with the
-Sora icon, built from `doc-page.svg` and `pdf-label.svg`. `incognito.ico` carries no
-branding and stays Chromium's. Still using the Chromium icon: `app_list.ico`, the
+Sora icon, built from `doc-page.svg` and `pdf-label.svg`. The incognito icon
+(`incognito.ico`) is the same tile at night, from `sora-incognito.svg`: navy sky
+`#0B1433`→`#2B3F86`, a white crescent moon in place of the sun, two stars and a violet horizon
+`#4A3A7A`→`#2A1F4F`. Still using the Chromium icon: `app_list.ico`, the
 Linux/Mac/ChromeOS ones and the `webstore_icon*` files.
 
 No patch has been compiled yet. The first build will show the compile errors and the

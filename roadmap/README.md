@@ -115,6 +115,7 @@ default stays with the Chromium default.
 ## Branding
 - [x] Windows app icon: PNGs, `chromium.ico` and Start tiles (`sora/branding/`).
 - [x] HTML and PDF document icons (`chromium_doc.ico`, `chromium_pdf.ico`).
+- [x] Incognito icon: the tile at night, with a crescent moon (`sora-incognito.svg`).
 - [ ] Linux and Mac icons (once there are builds for those platforms).
 - [x] UI strings: "Chromium" → "Sora" in messages and translations
   (`sora/tools/rebrand_strings.py`, run by `build.py`).
